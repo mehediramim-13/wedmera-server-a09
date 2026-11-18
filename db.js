@@ -78,3 +78,11 @@ export function getDb() {
   if (!db) throw new Error("Database is not connected.");
   return db;
 }
+
+export async function closeDB() {
+  if (client) await client.close();
+  client = undefined;
+  db = undefined;
+  connectionPromise = undefined;
+  initializationPromise = undefined;
+}
