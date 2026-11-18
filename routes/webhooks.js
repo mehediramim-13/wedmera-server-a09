@@ -18,7 +18,7 @@ async function downgradeVendor(db, vendorId) {
   );
   const limit = Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3);
   const active = await db.collection("services").find({
-    vendorId, isActive: true, status: { $ne: "rejected" },
+    vendorId, isActive: { $ne: false }, status: { $ne: "Rejected" },
   }).sort({ createdAt: 1 }).toArray();
   if (active.length > limit) {
     await db.collection("services").updateMany(

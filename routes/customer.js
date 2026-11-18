@@ -12,10 +12,10 @@ router.get("/overview", async (req, res, next) => {
     const db = getDb();
     const [totalBookings, pending, accepted, rejected, cancelled] = await Promise.all([
       db.collection("bookings").countDocuments({ customerId: req.user._id }),
-      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "pending" }),
-      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "accepted" }),
-      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "rejected" }),
-      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "cancelled" }),
+      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "Pending" }),
+      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "Accepted" }),
+      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "Rejected" }),
+      db.collection("bookings").countDocuments({ customerId: req.user._id, status: "Cancelled" }),
     ]);
     sendResponse(res, 200, true, "Customer overview fetched.", { totalBookings, pending, accepted, rejected, cancelled });
   } catch (error) { next(error); }
@@ -62,10 +62,10 @@ router.patch("/bookings/:id/cancel", async (req, res, next) => {
     const booking = await db.collection("bookings").findOne({ _id: id });
     if (!booking) return sendResponse(res, 404, false, "Booking not found.");
     if (String(booking.customerId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
-    if (booking.status !== "pending") return sendResponse(res, 409, false, "Only pending bookings can be cancelled.");
+    if (booking.status !== "Pending") return sendResponse(res, 409, false, "Only pending bookings can be cancelled.");
     const result = await db.collection("bookings").findOneAndUpdate(
-      { _id: id, customerId: req.user._id, status: "pending" },
-      { $set: { status: "cancelled", updatedAt: new Date() } },
+      { _id: id, customerId: req.user._id, status: "Pending" },
+      { $set: { status: "Cancelled", updatedAt: new Date() } },
       { returnDocument: "after" },
     );
     if (!result) return sendResponse(res, 409, false, "Only pending bookings can be cancelled.");

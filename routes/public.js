@@ -18,14 +18,33 @@ const upload = multer({
 });
 const uploadLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 
+function visibleServiceStages(filter) {
+  return [
+    { $match: filter },
+    { $lookup: {
+      from: process.env.USERS_COLLECTION || "user",
+      localField: "vendorId",
+      foreignField: "_id",
+      as: "vendor",
+    } },
+    { $unwind: "$vendor" },
+    { $match: { "vendor.isBlocked": { $ne: true } } },
+  ];
+}
+
 router.get("/categories", async (req, res, next) => {
   try {
     await connectDB();
     const db = getDb();
-    const items = await Promise.all(SERVICE_CATEGORIES.map(async (category) => ({
+    const counts = await db.collection("services").aggregate([
+      ...visibleServiceStages({ status: "Approved", isActive: { $ne: false } }),
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+    ]).toArray();
+    const countByCategory = new Map(counts.map(({ _id, count }) => [_id, count]));
+    const items = SERVICE_CATEGORIES.map((category) => ({
       category,
-      count: await db.collection("services").countDocuments({ category, status: "approved", isActive: true }),
-    })));
+      count: countByCategory.get(category) || 0,
+    }));
     sendResponse(res, 200, true, "Categories fetched.", items);
   } catch (error) { next(error); }
 });
@@ -36,7 +55,7 @@ router.get("/services", async (req, res, next) => {
     const db = getDb();
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 12));
-    const filter = { status: "approved", isActive: true };
+    const filter = { status: "Approved", isActive: { $ne: false } };
     if (req.query.search) filter.serviceName = { $regex: escapeRegex(req.query.search), $options: "i" };
     if (req.query.category) filter.category = req.query.category;
     if (req.query.location) filter.location = { $regex: escapeRegex(req.query.location), $options: "i" };
@@ -53,10 +72,7 @@ router.get("/services", async (req, res, next) => {
     if (req.query.featured === "true") req.query.limit = "6";
     const actualLimit = req.query.featured === "true" ? 6 : limit;
     const pipeline = [
-      { $match: filter },
-      { $lookup: { from: process.env.USERS_COLLECTION || "user", localField: "vendorId", foreignField: "_id", as: "vendor" } },
-      { $unwind: "$vendor" },
-      { $match: { "vendor.isBlocked": { $ne: true } } },
+      ...visibleServiceStages(filter),
       { $sort: sort },
       { $skip: req.query.featured === "true" ? 0 : (page - 1) * actualLimit },
       { $limit: actualLimit },
@@ -78,10 +94,15 @@ router.get("/services", async (req, res, next) => {
         name: vendor.name || "",
         image: vendor.image || null,
         businessName: vendor.businessName || "",
+        isPremium: getEffectivePlan(vendor) === "premium",
       } : null;
       item.isPremium = vendor ? getEffectivePlan(vendor) === "premium" : false;
     }
-    const total = await db.collection("services").countDocuments(filter);
+    const totalCount = await db.collection("services").aggregate([
+      ...visibleServiceStages(filter),
+      { $count: "total" },
+    ]).toArray();
+    const total = totalCount[0]?.total || 0;
     sendResponse(res, 200, true, "Services fetched.", {
       items,
       total,

@@ -14,9 +14,9 @@ router.get("/overview", async (req, res, next) => {
     const db = getDb();
     const [totalServices, activeServices, pendingBookingRequests, acceptedBookings] = await Promise.all([
       db.collection("services").countDocuments({ vendorId: req.user._id }),
-      db.collection("services").countDocuments({ vendorId: req.user._id, isActive: true }),
-      db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "pending" }),
-      db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "accepted" }),
+      db.collection("services").countDocuments({ vendorId: req.user._id, isActive: { $ne: false } }),
+      db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Pending" }),
+      db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Accepted" }),
     ]);
     sendResponse(res, 200, true, "Vendor overview fetched.", {
       totalServices, activeServices, pendingBookingRequests, acceptedBookings,
@@ -47,7 +47,7 @@ router.post("/services", validateBody(createServiceSchema), async (req, res, nex
     const db = getDb();
     if (getEffectivePlan(req.user) === "free") {
       const count = await db.collection("services").countDocuments({
-        vendorId: req.user._id, isActive: true, status: { $ne: "rejected" },
+        vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
       });
       if (count >= Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3)) {
         return sendResponse(res, 403, false, "Free plan limit reached (3 active services). Upgrade to Premium");
@@ -57,7 +57,7 @@ router.post("/services", validateBody(createServiceSchema), async (req, res, nex
     const service = {
       ...req.validated,
       vendorId: req.user._id,
-      status: "pending",
+      status: "Pending",
       isActive: true,
       createdAt: now,
       updatedAt: now,
@@ -86,7 +86,7 @@ router.patch("/services/:id", validateBody(updateServiceSchema), async (req, res
     if (String(service.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     const result = await db.collection("services").findOneAndUpdate(
       { _id: id, vendorId: req.user._id },
-      { $set: { ...req.validated, status: "pending", updatedAt: new Date() } },
+      { $set: { ...req.validated, status: "Pending", updatedAt: new Date() } },
       { returnDocument: "after" },
     );
     sendResponse(res, 200, true, "Service updated and submitted for review.", result);
@@ -103,7 +103,7 @@ router.patch("/services/:id/availability", validateBody(z.object({ isActive: z.b
     if (String(service.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     if (req.validated.isActive === true && getEffectivePlan(req.user) === "free") {
       const count = await db.collection("services").countDocuments({
-        vendorId: req.user._id, isActive: true, status: { $ne: "rejected" }, _id: { $ne: id },
+        vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" }, _id: { $ne: id },
       });
       if (count >= Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3)) {
         return sendResponse(res, 403, false, "Free plan limit reached (3 active services). Upgrade to Premium");
@@ -127,8 +127,8 @@ router.delete("/services/:id", async (req, res, next) => {
     if (!service) return sendResponse(res, 404, false, "Service not found.");
     if (String(service.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     await db.collection("bookings").updateMany(
-      { serviceId: id, status: "pending" },
-      { $set: { status: "cancelled", updatedAt: new Date() } },
+      { serviceId: id, status: "Pending" },
+      { $set: { status: "Cancelled", updatedAt: new Date() } },
     );
     await db.collection("services").deleteOne({ _id: id, vendorId: req.user._id });
     sendResponse(res, 200, true, "Service deleted.");
@@ -165,9 +165,9 @@ async function processVendorBooking(req, res, next, status) {
     const booking = await db.collection("bookings").findOne({ _id: id });
     if (!booking) return sendResponse(res, 404, false, "Booking not found.");
     if (String(booking.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
-    if (booking.status !== "pending") return sendResponse(res, 409, false, "Booking has already been processed.");
+    if (booking.status !== "Pending") return sendResponse(res, 409, false, "Booking has already been processed.");
     const result = await db.collection("bookings").findOneAndUpdate(
-      { _id: id, vendorId: req.user._id, status: "pending" },
+      { _id: id, vendorId: req.user._id, status: "Pending" },
       { $set: { status, updatedAt: new Date() } },
       { returnDocument: "after" },
     );
@@ -176,14 +176,14 @@ async function processVendorBooking(req, res, next, status) {
   } catch (error) { next(error); }
 }
 
-router.patch("/bookings/:id/accept", (req, res, next) => processVendorBooking(req, res, next, "accepted"));
-router.patch("/bookings/:id/reject", (req, res, next) => processVendorBooking(req, res, next, "rejected"));
+router.patch("/bookings/:id/accept", (req, res, next) => processVendorBooking(req, res, next, "Accepted"));
+router.patch("/bookings/:id/reject", (req, res, next) => processVendorBooking(req, res, next, "Rejected"));
 
 router.get("/subscription", async (req, res, next) => {
   try {
     const db = getDb();
     const activeServicesCount = await db.collection("services").countDocuments({
-      vendorId: req.user._id, isActive: true, status: { $ne: "rejected" },
+      vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
     });
     sendResponse(res, 200, true, "Subscription fetched.", {
       plan: req.user.subscriptionPlan === "premium" ? "premium" : "free",

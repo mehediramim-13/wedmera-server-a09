@@ -31,7 +31,7 @@ router.post("/", requireRole("customer"), validateBody(bookingSchema), async (re
     const db = getDb();
     const service = await db.collection("services").findOne({ _id: toObjectId(req.validated.serviceId) });
     if (!service) return sendResponse(res, 404, false, "Service not found.");
-    if (service.status !== "approved" || service.isActive !== true) return sendResponse(res, 404, false, "Service not found.");
+    if (service.status !== "Approved" || service.isActive === false) return sendResponse(res, 404, false, "Service not found.");
     if (String(service.vendorId) === String(req.user._id)) return sendResponse(res, 403, false, "You cannot book your own service.");
     const eventDate = /^\d{4}-\d{2}-\d{2}$/.test(req.validated.eventDate)
       ? new Date(`${req.validated.eventDate}T00:00:00.000Z`)
@@ -45,7 +45,7 @@ router.post("/", requireRole("customer"), validateBody(bookingSchema), async (re
       customerId: req.user._id,
       serviceId: service._id,
       eventDate,
-      status: { $in: ["pending", "accepted"] },
+      status: { $in: ["Pending", "Accepted"] },
     });
     if (duplicate) return sendResponse(res, 409, false, "An active booking already exists for this service and date.");
     const now = new Date();
@@ -56,7 +56,7 @@ router.post("/", requireRole("customer"), validateBody(bookingSchema), async (re
       eventDate,
       eventLocation: req.validated.eventLocation,
       message: req.validated.message,
-      status: "pending",
+      status: "Pending",
       createdAt: now,
       updatedAt: now,
     };

@@ -13,7 +13,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     if (!service) return sendResponse(res, 404, false, "Service not found.");
     const isOwner = String(service.vendorId) === String(req.user._id);
     if (!isOwner && req.user.role !== "admin" &&
-      (service.status !== "approved" || service.isActive !== true)) {
+      (service.status !== "Approved" || service.isActive === false)) {
       return sendResponse(res, 404, false, "Service not found.");
     }
     const vendor = await db.collection(process.env.USERS_COLLECTION || "user").findOne(

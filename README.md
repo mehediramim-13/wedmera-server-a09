@@ -136,9 +136,9 @@ Send protected requests with `Authorization: Bearer <token>`.
 
 ## Status and category constants
 
-Service statuses: `pending`, `approved`, `rejected`
+Service statuses: `Pending`, `Approved`, `Rejected`
 
-Booking statuses: `pending`, `accepted`, `rejected`, `cancelled`
+Booking statuses: `Pending`, `Accepted`, `Rejected`, `Cancelled`
 
 User roles: `vendor`, `customer`, `admin`
 

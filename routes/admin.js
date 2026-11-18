@@ -19,7 +19,7 @@ router.get("/overview", async (req, res, next) => {
         users.countDocuments({ role: "vendor" }),
         users.countDocuments({ role: "customer" }),
         db.collection("services").countDocuments({}),
-        db.collection("services").countDocuments({ status: "pending" }),
+        db.collection("services").countDocuments({ status: "Pending" }),
         db.collection("transactions").countDocuments({}),
         db.collection("transactions").aggregate([
           { $match: { status: "paid" } },
@@ -111,7 +111,7 @@ router.get("/services", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.patch("/services/:id/status", validateBody(z.object({ status: z.enum(["approved", "rejected", "pending"]) }).strict()), async (req, res, next) => {
+router.patch("/services/:id/status", validateBody(z.object({ status: z.enum(["Approved", "Rejected", "Pending"]) }).strict()), async (req, res, next) => {
   if (!isValidObjectId(req.params.id)) return sendResponse(res, 400, false, "Invalid service id");
   try {
     const result = await getDb().collection("services").findOneAndUpdate(
@@ -130,7 +130,7 @@ router.delete("/services/:id", async (req, res, next) => {
     const db = getDb();
     const id = toObjectId(req.params.id);
     if (!await db.collection("services").findOne({ _id: id })) return sendResponse(res, 404, false, "Service not found.");
-    await db.collection("bookings").updateMany({ serviceId: id, status: "pending" }, { $set: { status: "cancelled", updatedAt: new Date() } });
+    await db.collection("bookings").updateMany({ serviceId: id, status: "Pending" }, { $set: { status: "Cancelled", updatedAt: new Date() } });
     await db.collection("services").deleteOne({ _id: id });
     sendResponse(res, 200, true, "Service deleted.");
   } catch (error) { next(error); }

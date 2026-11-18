@@ -8,8 +8,8 @@ export const SERVICE_CATEGORIES = [
   "Makeup & Styling",
   "Wedding Fashion",
 ];
-export const SERVICE_STATUSES = ["pending", "approved", "rejected"];
-export const BOOKING_STATUSES = ["pending", "accepted", "rejected", "cancelled"];
+export const SERVICE_STATUSES = ["Pending", "Approved", "Rejected"];
+export const BOOKING_STATUSES = ["Pending", "Accepted", "Rejected", "Cancelled"];
 export const USER_ROLES = ["vendor", "customer", "admin"];
 
 export function sendResponse(res, status, success, message, data, errors) {
