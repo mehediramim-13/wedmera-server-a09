@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import { connectDB } from "./db.js";
+import { connectDB, initDatabase } from "./db.js";
 import { notFound, errorHandler } from "./middleware/errorHandler.js";
 import { sendResponse } from "./helpers.js";
 
@@ -34,8 +34,6 @@ app.use(cors({
 }));
 app.options(/.*/, cors());
 
-app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), webhookRoutes);
-
 app.use(express.json({ limit: "1mb" }));
 app.get("/", (req, res) => {
   sendResponse(res, 200, true, "WedMera API is running.");
@@ -43,25 +41,43 @@ app.get("/", (req, res) => {
 app.get("/api/health", (req, res) => {
   sendResponse(res, 200, true, "WedMera API is healthy.", { status: "ok" });
 });
+app.get("/api/health/db", async (req, res) => {
+  try {
+    const db = await initDatabase();
+    await db.command({ ping: 1 });
+    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    res.json({
+      success: true,
+      database: process.env.DB_NAME,
+      collections: collections.map((collection) => collection.name),
+    });
+  } catch (error) {
+    console.error("MongoDB health check failed:", error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 const ensureDB = async (req, res, next) => {
   try {
     await connectDB();
+    await initDatabase();
     next();
   } catch (error) {
+    console.error("MongoDB request initialization failed:", error.message);
     next(error);
   }
 };
 
-app.use("/api/webhooks/stripe", ensureDB);
+app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), ensureDB, webhookRoutes);
+app.use("/api", ensureDB);
 app.use("/api", publicRoutes);
-app.use("/api/users", ensureDB, usersRoutes);
-app.use("/api/services", ensureDB, servicesRoutes);
-app.use("/api/vendor", ensureDB, vendorRoutes);
-app.use("/api/customer", ensureDB, customerRoutes);
-app.use("/api/bookings", ensureDB, bookingsRoutes);
-app.use("/api/admin", ensureDB, adminRoutes);
-app.use("/api/payments", ensureDB, paymentsRoutes);
+app.use("/api/users", usersRoutes);
+app.use("/api/services", servicesRoutes);
+app.use("/api/vendor", vendorRoutes);
+app.use("/api/customer", customerRoutes);
+app.use("/api/bookings", bookingsRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/payments", paymentsRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
@@ -69,8 +85,20 @@ app.use(errorHandler);
 export default app;
 
 if (!process.env.VERCEL) {
-  const port = process.env.PORT || 5000;
-  app.listen(port, () => {
-    console.log(`WedMera API is running on port ${port}.`);
-  });
+  const startServer = async () => {
+    try {
+      await initDatabase();
+      const businessCollections = ["services", "bookings", "transactions"];
+      console.log(`MongoDB connected: ${process.env.DB_NAME}`);
+      console.log(`Collections ready: ${businessCollections.join(", ")}`);
+      const port = process.env.PORT || 5000;
+      app.listen(port, () => {
+        console.log(`WedMera API is running on port ${port}.`);
+      });
+    } catch (error) {
+      console.error("Unable to start WedMera API:", error.message);
+      process.exitCode = 1;
+    }
+  };
+  startServer();
 }
