@@ -24,15 +24,21 @@ const allowedOrigins = (process.env.CLIENT_URL || "")
   .map((origin) => origin.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
-app.use(cors({
+const corsOptions = {
   origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Origin is not allowed by CORS."));
   },
   methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type"],
-}));
-app.options(/.*/, cors());
+  // A failed preflight is indistinguishable from a missing token in the
+  // browser, so answer OPTIONS explicitly and cache the result.
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
+};
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 app.use(express.json({ limit: "1mb" }));
 app.get("/", (req, res) => {
@@ -70,9 +76,11 @@ const ensureDB = async (req, res, next) => {
 
 app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), ensureDB, webhookRoutes);
 app.use("/api", ensureDB);
+// Mount the private service-details router before the public router so
+// /api/services/:id can never be shadowed by a public /api/services route.
+app.use("/api/services", servicesRoutes);
 app.use("/api", publicRoutes);
 app.use("/api/users", usersRoutes);
-app.use("/api/services", servicesRoutes);
 app.use("/api/vendor", vendorRoutes);
 app.use("/api/customer", customerRoutes);
 app.use("/api/bookings", bookingsRoutes);
