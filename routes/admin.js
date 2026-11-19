@@ -111,7 +111,11 @@ router.get("/services", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.patch("/services/:id/status", validateBody(z.object({ status: z.enum(["Approved", "Rejected", "Pending"]) }).strict()), async (req, res, next) => {
+const serviceModerationSchema = z.object({
+  status: z.enum(["Approved", "Rejected"]),
+}).strict();
+
+async function updateServiceStatus(req, res, next) {
   if (!isValidObjectId(req.params.id)) return sendResponse(res, 400, false, "Invalid service id");
   try {
     const result = await getDb().collection("services").findOneAndUpdate(
@@ -122,7 +126,14 @@ router.patch("/services/:id/status", validateBody(z.object({ status: z.enum(["Ap
     if (!result) return sendResponse(res, 404, false, "Service not found.");
     sendResponse(res, 200, true, "Service status updated.", result);
   } catch (error) { next(error); }
-});
+}
+
+// Established API contract: PATCH /api/admin/services/:id/status
+router.patch("/services/:id/status", validateBody(serviceModerationSchema), updateServiceStatus);
+
+// Admin dashboard contract: PATCH /api/admin/services/:id with { status }.
+// Keep both mounted so existing clients are not broken.
+router.patch("/services/:id", validateBody(serviceModerationSchema), updateServiceStatus);
 
 router.delete("/services/:id", async (req, res, next) => {
   if (!isValidObjectId(req.params.id)) return sendResponse(res, 400, false, "Invalid service id");

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch index.js",
     "start": "node index.js",
-    "seed:admin": "node scripts/seedAdmin.js"
+    "seed:admin": "node scripts/seedAdmin.js",
+    "test:admin-services": "node scripts/testAdminServiceStatus.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

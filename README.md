@@ -44,6 +44,14 @@ Production-style start:
 npm start
 ```
 
+With the client and API running, verify admin service moderation with:
+
+```bash
+npm run test:admin-services
+```
+
+The test creates temporary users and a temporary service, then removes them.
+
 The server listens on `PORT` (default `5000`) outside Vercel.
 
 ## Required application URLs
@@ -128,7 +136,8 @@ Never commit `.env`.
 | PATCH | `/api/admin/users/:id/block` | Admin |
 | PATCH | `/api/admin/users/:id/unblock` | Admin |
 | GET | `/api/admin/services` | Admin |
-| PATCH | `/api/admin/services/:id/status` | Admin |
+| PATCH | `/api/admin/services/:id` | Admin |
+| PATCH | `/api/admin/services/:id/status` | Admin (legacy alias) |
 | DELETE | `/api/admin/services/:id` | Admin |
 | GET | `/api/admin/transactions` | Admin |
 
