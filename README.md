@@ -1,4 +1,4 @@
-# WedMera — Wedding Planning Platform
+# WedMera - Wedding Planning Platform
 
 WedMera is an Express.js and MongoDB backend for a wedding planning marketplace. Vendors publish and manage wedding services, customers discover services and create bookings, administrators moderate the marketplace, and vendors purchase Premium subscriptions through Stripe.
 
