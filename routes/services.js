@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
-import { getEffectivePlan, isValidObjectId, sendResponse, toObjectId } from "../helpers.js";
+import { isValidObjectId, sendResponse, subscriptionResponse, toObjectId } from "../helpers.js";
 
 const router = Router();
 
@@ -18,11 +18,12 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     }
     const vendor = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
       { _id: service.vendorId },
-      { projection: { name: 1, image: 1, businessName: 1, isBlocked: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1 } },
+      { projection: { name: 1, image: 1, businessName: 1, isBlocked: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
     );
     if (!isOwner && req.user.role !== "admin" && vendor?.isBlocked === true) {
       return sendResponse(res, 404, false, "Service not found.");
     }
+    const subscription = vendor ? subscriptionResponse(vendor) : null;
     sendResponse(res, 200, true, "Service fetched.", {
       ...service,
       vendor: vendor ? {
@@ -30,7 +31,12 @@ router.get("/:id", requireAuth, async (req, res, next) => {
         name: vendor.name || "",
         image: vendor.image || null,
         businessName: vendor.businessName || "",
-        isPremium: getEffectivePlan(vendor) === "premium",
+        isPremium: subscription.isPremium,
+        isFeatured: subscription.isFeatured,
+        status: subscription.status,
+        subscriptionStatus: subscription.subscriptionStatus,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+        currentPeriodEnd: subscription.currentPeriodEnd,
       } : null,
     });
   } catch (error) { next(error); }
