@@ -3,7 +3,7 @@ import Stripe from "stripe";
 import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/roles.js";
-import { getEffectivePlan, sendResponse } from "../helpers.js";
+import { buildVendorPlanUpdate, getCurrentPeriodEnd, getCurrentPeriodStart, getEffectivePlan, sendResponse, subscriptionPeriodDatesFromStripe, subscriptionResponse } from "../helpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("vendor"));
@@ -140,12 +140,57 @@ router.get("/session/:sessionId", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+async function persistLocalSubscriptionState(req, { cancelAtPeriodEnd, status, periodStart, periodEnd }) {
+  const users = getDb().collection(process.env.USERS_COLLECTION || "user");
+  const start = periodStart || getCurrentPeriodStart(req.user);
+  const expiresAt = periodEnd || getCurrentPeriodEnd(req.user);
+  await users.updateOne(
+    { _id: req.user._id },
+    {
+      $set: buildVendorPlanUpdate({
+        status,
+        cancelAtPeriodEnd,
+        currentPeriodStart: start,
+        currentPeriodEnd: expiresAt,
+      }),
+    },
+  );
+  return subscriptionResponse(await users.findOne({ _id: req.user._id }));
+}
+
 router.post("/cancel-subscription", async (req, res, next) => {
   try {
     if (!req.user.stripeSubscriptionId) return sendResponse(res, 404, false, "No active subscription found.");
     const stripe = getStripe();
-    await stripe.subscriptions.update(req.user.stripeSubscriptionId, { cancel_at_period_end: true });
-    sendResponse(res, 200, true, "Subscription will cancel at the end of the billing period.");
+    const subscription = await stripe.subscriptions.update(req.user.stripeSubscriptionId, {
+      cancel_at_period_end: true,
+    });
+    const { currentPeriodStart, currentPeriodEnd } = subscriptionPeriodDatesFromStripe(subscription);
+    const state = await persistLocalSubscriptionState(req, {
+      cancelAtPeriodEnd: true,
+      status: subscription?.status || "active",
+      periodStart: currentPeriodStart,
+      periodEnd: currentPeriodEnd,
+    });
+    sendResponse(res, 200, true, "Subscription will cancel at the end of the billing period.", state);
+  } catch (error) { next(error); }
+});
+
+router.post("/resume-subscription", async (req, res, next) => {
+  try {
+    if (!req.user.stripeSubscriptionId) return sendResponse(res, 404, false, "No subscription found to resume.");
+    const stripe = getStripe();
+    const subscription = await stripe.subscriptions.update(req.user.stripeSubscriptionId, {
+      cancel_at_period_end: false,
+    });
+    const { currentPeriodStart, currentPeriodEnd } = subscriptionPeriodDatesFromStripe(subscription);
+    const state = await persistLocalSubscriptionState(req, {
+      cancelAtPeriodEnd: false,
+      status: subscription?.status || "active",
+      periodStart: currentPeriodStart,
+      periodEnd: currentPeriodEnd,
+    });
+    sendResponse(res, 200, true, "Subscription resumed.", state);
   } catch (error) { next(error); }
 });
 
