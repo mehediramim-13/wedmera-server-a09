@@ -2,7 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 import rateLimit from "express-rate-limit";
 import { connectDB, getDb } from "../db.js";
-import { SERVICE_CATEGORIES, escapeRegex, sendResponse, getEffectivePlan } from "../helpers.js";
+import { SERVICE_CATEGORIES, escapeRegex, getEffectivePlan, sendResponse, subscriptionResponse } from "../helpers.js";
 
 const router = Router();
 const upload = multer({
@@ -71,32 +71,61 @@ router.get("/services", async (req, res, next) => {
       : { createdAt: -1 };
     if (req.query.featured === "true") req.query.limit = "6";
     const actualLimit = req.query.featured === "true" ? 6 : limit;
+    const featuredOnly = req.query.featured === "true";
+    let premiumVendorIds = [];
+    if (featuredOnly) {
+      const candidateVendorIds = await db.collection("services").distinct("vendorId", filter);
+      const vendors = candidateVendorIds.length
+        ? await db.collection(process.env.USERS_COLLECTION || "user").find(
+          { _id: { $in: candidateVendorIds } },
+          {
+            projection: {
+              status: 1,
+              subscriptionStatus: 1,
+              currentPeriodEnd: 1,
+              subscriptionExpiresAt: 1,
+              subscriptionPlan: 1,
+            },
+          },
+        ).toArray()
+        : [];
+      // Featured placement uses the same single source of truth as the API.
+      premiumVendorIds = vendors
+        .filter((vendor) => getEffectivePlan(vendor) === "premium")
+        .map((vendor) => vendor._id);
+    }
     const pipeline = [
+      ...(featuredOnly ? [{ $match: { vendorId: { $in: premiumVendorIds } } }] : []),
       ...visibleServiceStages(filter),
       { $sort: sort },
-      { $skip: req.query.featured === "true" ? 0 : (page - 1) * actualLimit },
+      { $skip: featuredOnly ? 0 : (page - 1) * actualLimit },
       { $limit: actualLimit },
       { $project: {
         serviceName: 1, category: 1, description: 1, price: 1, location: 1, images: 1,
         status: 1, isActive: 1, createdAt: 1, updatedAt: 1, vendorId: 1,
-        vendor: { _id: "$vendor._id", name: "$vendor.name", image: "$vendor.image", businessName: "$vendor.businessName",
-          isPremium: { $literal: false } }
+        vendor: { _id: "$vendor._id", name: "$vendor.name", image: "$vendor.image", businessName: "$vendor.businessName" }
       } },
     ];
     const items = await db.collection("services").aggregate(pipeline).toArray();
     for (const item of items) {
       const vendor = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
         { _id: item.vendorId },
-        { projection: { name: 1, image: 1, businessName: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1 } },
+        { projection: { name: 1, image: 1, businessName: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
       );
+      const subscription = vendor ? subscriptionResponse(vendor) : null;
       item.vendor = vendor ? {
         _id: vendor._id,
         name: vendor.name || "",
         image: vendor.image || null,
         businessName: vendor.businessName || "",
-        isPremium: getEffectivePlan(vendor) === "premium",
+        isPremium: subscription.isPremium,
+        isFeatured: subscription.isFeatured,
+        status: subscription.status,
+        subscriptionStatus: subscription.subscriptionStatus,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+        currentPeriodEnd: subscription.currentPeriodEnd,
       } : null;
-      item.isPremium = vendor ? getEffectivePlan(vendor) === "premium" : false;
+      item.isPremium = subscription?.isPremium === true;
     }
     const totalCount = await db.collection("services").aggregate([
       ...visibleServiceStages(filter),
@@ -106,7 +135,7 @@ router.get("/services", async (req, res, next) => {
     sendResponse(res, 200, true, "Services fetched.", {
       items,
       total,
-      page: req.query.featured === "true" ? 1 : page,
+      page: featuredOnly ? 1 : page,
       limit: actualLimit,
       pages: Math.ceil(total / actualLimit),
     });
