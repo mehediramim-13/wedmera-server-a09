@@ -1,10 +1,9 @@
 import { Router } from "express";
 import Stripe from "stripe";
 import { connectDB, getDb } from "../db.js";
-import { toObjectId } from "../helpers.js";
+import { buildVendorPlanUpdate, findActiveServices, getFreePlanServiceLimit, invoicePeriodDatesFromStripe, subscriptionPeriodDatesFromStripe, toObjectId, vendorIdQuery } from "../helpers.js";
 
 const router = Router();
-const FALLBACK_PERIOD_MS = 31 * 24 * 60 * 60 * 1000;
 
 export function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) throw new Error("Missing required environment variable: STRIPE_SECRET_KEY");
@@ -50,30 +49,35 @@ function amountInUsd(cents) {
   return typeof cents === "number" && Number.isFinite(cents) ? Math.round(cents) / 100 : 0;
 }
 
-function isFutureDate(value) {
-  const date = value instanceof Date ? value : value ? new Date(value) : null;
-  return date instanceof Date && !Number.isNaN(date.getTime()) && date.getTime() > Date.now();
-}
-
-function subscriptionPeriodEnd(subscription) {
-  const timestamp = subscription?.current_period_end ??
-    subscription?.items?.data?.[0]?.current_period_end;
-  const seconds = Number(timestamp);
-  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
-}
-
-function invoicePeriodEnd(invoice) {
-  const timestamp = invoice?.period_end ??
-    invoice?.lines?.data?.[0]?.period?.end;
-  const seconds = Number(timestamp);
-  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null;
-}
-
-function periodEndOrFallback(...candidates) {
+function firstDate(...candidates) {
   for (const candidate of candidates) {
     if (candidate instanceof Date && !Number.isNaN(candidate.getTime())) return candidate;
   }
-  return new Date(Date.now() + FALLBACK_PERIOD_MS);
+  return null;
+}
+
+// Stripe retries deliver the same event ID. Recording IDs before handling
+// prevents a replay from reapplying an old state after a newer event changed it.
+async function claimEvent(db, event) {
+  if (!event?.id) return { claimed: true, eventId: null };
+  const eventId = String(event.id);
+  try {
+    await db.collection("stripeEvents").insertOne({
+      _id: eventId,
+      type: event.type || null,
+      createdAt: new Date(),
+    });
+    return { claimed: true, eventId };
+  } catch (error) {
+    if (error?.code === 11000) return { claimed: false, eventId };
+    throw error;
+  }
+}
+
+// If handling fails, release the claim so Stripe's retry can process the event.
+async function releaseEvent(db, eventId) {
+  if (!eventId) return;
+  await db.collection("stripeEvents").deleteOne({ _id: eventId });
 }
 
 function subscriptionPriceId(subscription) {
@@ -110,21 +114,43 @@ async function vendorIdFromSession(db, session) {
   return null;
 }
 
-async function vendorIdFromSubscription(db, subscription) {
-  const fromMetadata = normalizeVendorId(subscription?.metadata?.vendorId);
-  if (fromMetadata) return fromMetadata;
+async function vendorIdFromTransaction(db, field, value, context) {
+  if (!value) return null;
+  const transaction = await db.collection("transactions").findOne(
+    { [field]: value },
+    { sort: { createdAt: -1 }, projection: { vendorId: 1 } },
+  );
+  return transaction ? String(transaction.vendorId) : null;
+}
 
-  const customerId = asStripeId(subscription?.customer);
-  if (customerId) {
-    const byCustomer = await usersCollection(db).findOne({ stripeCustomerId: customerId });
-    if (byCustomer) return String(byCustomer._id);
-  }
-
+async function vendorIdFromSubscription(db, subscription, context = {}) {
   const subscriptionId = asStripeId(subscription?.id);
-  if (subscriptionId) {
-    const bySubscription = await usersCollection(db).findOne({ stripeSubscriptionId: subscriptionId });
-    if (bySubscription) return String(bySubscription._id);
+  const customerId = asStripeId(subscription?.customer);
+  const metadataVendorId = normalizeVendorId(subscription?.metadata?.vendorId);
+
+  // Stripe IDs saved on the vendor are authoritative. Metadata can be stale or
+  // missing on subscriptions created before subscription_data.metadata existed.
+  const attempts = [
+    { field: "stripeSubscriptionId", value: subscriptionId, query: { stripeSubscriptionId: subscriptionId } },
+    { field: "stripeCustomerId", value: customerId, query: { stripeCustomerId: customerId } },
+    { field: "subscription.metadata.vendorId", value: metadataVendorId, query: vendorFilter(metadataVendorId) },
+  ];
+
+  for (const attempt of attempts) {
+    if (!attempt.value) continue;
+    const user = await usersCollection(db).findOne(attempt.query, { projection: { _id: 1 } });
+    if (user) return String(user._id);
   }
+
+  // Legacy vendors may be missing both Stripe ID fields. Payment history is
+  // read-only here and can still identify the original vendor.
+  const transactionVendorId = await vendorIdFromTransaction(
+    db,
+    "stripeSubscriptionId",
+    subscriptionId,
+    context,
+  );
+  if (transactionVendorId) return transactionVendorId;
 
   return null;
 }
@@ -175,60 +201,61 @@ async function updateVendorUser(db, vendorId, $set, context) {
   return result;
 }
 
-async function activateVendor(db, vendorId, { customerId, subscriptionId, priceId, periodEnd }, context) {
-  const expiry = periodEnd instanceof Date && !Number.isNaN(periodEnd.getTime())
-    ? periodEnd
-    : new Date(Date.now() + FALLBACK_PERIOD_MS);
-  const $set = {
-    subscriptionPlan: "premium",
-    subscriptionExpiresAt: expiry,
-  };
-  if (customerId) $set.stripeCustomerId = customerId;
-  if (subscriptionId) $set.stripeSubscriptionId = subscriptionId;
-  if (priceId) $set.stripePriceId = priceId;
+async function activateVendor(
+  db,
+  vendorId,
+  { customerId, subscriptionId, priceId, periodStart, periodEnd, status, cancelAtPeriodEnd = false },
+  context,
+) {
+  const start = periodStart instanceof Date && !Number.isNaN(periodStart.getTime()) ? periodStart : null;
+  const expiry = periodEnd instanceof Date && !Number.isNaN(periodEnd.getTime()) ? periodEnd : null;
+  const $set = buildVendorPlanUpdate({
+    // Stripe keeps status "active"/"trialing" while cancelAtPeriodEnd is true.
+    // A scheduled cancellation is represented by cancelAtPeriodEnd, not by a
+    // different status that would make getEffectivePlan return "free".
+    status: status || "active",
+    cancelAtPeriodEnd,
+    currentPeriodStart: start,
+    currentPeriodEnd: expiry,
+    customerId,
+    subscriptionId,
+    priceId,
+  });
   return updateVendorUser(db, vendorId, $set, context);
 }
 
-async function downgradeVendor(db, vendorId, context) {
+async function downgradeVendor(db, vendorId, context, status = "canceled") {
   const user = await findVendorUser(db, vendorId);
   if (!user) {
     logError("downgrade_user_not_found", { ...context, vendorId });
     throw new Error(`No user matched vendorId ${vendorId} for ${context.handler}`);
   }
 
-  await updateVendorUser(db, vendorId, {
-    subscriptionPlan: "free",
-    subscriptionExpiresAt: null,
-  }, context);
+  const result = await updateVendorUser(db, vendorId, buildVendorPlanUpdate({
+    status,
+    cancelAtPeriodEnd: false,
+    currentPeriodStart: null,
+    currentPeriodEnd: null,
+    clearStripeSubscription: true,
+  }), context);
 
-  const limit = Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3);
-  const active = await db.collection("services").find({
-    vendorId: user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
-  }).sort({ createdAt: 1 }).toArray();
-  if (active.length > limit) {
-    const result = await db.collection("services").updateMany(
-      { _id: { $in: active.slice(limit).map((service) => service._id) } },
-      { $set: { isActive: false, updatedAt: new Date() } },
-    );
-    log("services_deactivated", {
-      ...context,
-      vendorId,
-      modifiedCount: result.modifiedCount,
-    });
-  }
-}
+  const limit = getFreePlanServiceLimit();
+  const active = await findActiveServices(db, user._id);
+  const extraIds = active.slice(limit).map((service) => service._id);
+  if (extraIds.length === 0) return result;
 
-// A subscription that is canceled/unpaid must not lose the paid period it has
-// already been charged for. Keep Premium until the stored period end passes.
-async function endSubscriptionAccess(db, vendorId, periodEnd, context) {
-  if (isFutureDate(periodEnd)) {
-    await updateVendorUser(db, vendorId, {
-      subscriptionPlan: "premium",
-      subscriptionExpiresAt: periodEnd,
-    }, context);
-    return;
-  }
-  await downgradeVendor(db, vendorId, context);
+  // Keep the oldest `limit` services active. Only the overflow is disabled;
+  // nothing is deleted, and vendors at or below the limit are untouched.
+  const serviceResult = await db.collection("services").updateMany(
+    { _id: { $in: extraIds }, vendorId: vendorIdQuery(user._id) },
+    { $set: { isActive: false, updatedAt: new Date() } },
+  );
+  log("services_deactivated", {
+    ...context,
+    vendorId,
+    modifiedCount: serviceResult.modifiedCount,
+  });
+  return result;
 }
 
 async function saveTransaction(db, data, context) {
@@ -255,6 +282,8 @@ async function saveTransaction(db, data, context) {
     stripeInvoiceId: invoiceId,
     stripeSubscriptionId: data.stripeSubscriptionId || null,
     status: data.status,
+    periodStart: data.periodStart || null,
+    periodEnd: data.periodEnd || null,
   };
 
   let action = "inserted";
@@ -275,6 +304,9 @@ async function saveTransaction(db, data, context) {
         stripeSubscriptionId: base.stripeSubscriptionId,
         updatedAt: new Date(),
       };
+      // Backfill period dates without erasing real dates when a replay lacks them.
+      if (data.periodStart) $set.periodStart = data.periodStart;
+      if (data.periodEnd) $set.periodEnd = data.periodEnd;
       // Keep success-page polling working even if invoice.paid was processed first.
       if (sessionId) $set.stripeSessionId = sessionId;
       result = await collection.updateOne({ _id: existing._id }, { $set });
@@ -298,6 +330,8 @@ async function saveTransaction(db, data, context) {
     stripeInvoiceId: invoiceId,
     amount: base.amount,
     status: base.status,
+    periodStart: base.periodStart ? base.periodStart.toISOString() : null,
+    periodEnd: base.periodEnd ? base.periodEnd.toISOString() : null,
     matchedCount: result.matchedCount,
     modifiedCount: result.modifiedCount,
     upsertedCount: result.upsertedCount,
@@ -372,17 +406,19 @@ async function handleCheckoutSessionCompleted(db, stripe, event) {
   }
 
   const subscription = await retrieveSubscription(stripe, subscriptionId, context);
-  let periodEnd = subscriptionPeriodEnd(subscription);
-  if (!periodEnd) {
+  const subscriptionDates = subscriptionPeriodDatesFromStripe(subscription);
+  let invoiceDates = { periodStart: null, periodEnd: null };
+  if (!subscriptionDates.currentPeriodStart || !subscriptionDates.currentPeriodEnd) {
     const invoice = await retrieveInvoice(stripe, asStripeId(session.invoice), context);
-    periodEnd = invoicePeriodEnd(invoice);
+    invoiceDates = invoicePeriodDatesFromStripe(invoice);
   }
-  if (periodEnd) {
-    log("period_end_resolved", { ...context, periodEnd: periodEnd.toISOString() });
-  } else {
-    periodEnd = new Date(Date.now() + FALLBACK_PERIOD_MS);
-    log("period_end_fallback", { ...context, periodEnd: periodEnd.toISOString() });
-  }
+  const periodStart = firstDate(subscriptionDates.currentPeriodStart, invoiceDates.periodStart);
+  const periodEnd = firstDate(subscriptionDates.currentPeriodEnd, invoiceDates.periodEnd);
+  log("period_resolved", {
+    ...context,
+    periodStart: periodStart ? periodStart.toISOString() : null,
+    periodEnd: periodEnd ? periodEnd.toISOString() : null,
+  });
 
   await saveTransaction(db, {
     vendorId: vendorUser._id,
@@ -392,13 +428,18 @@ async function handleCheckoutSessionCompleted(db, stripe, event) {
     stripeSessionId: session.id,
     stripeInvoiceId: asStripeId(session.invoice),
     stripeSubscriptionId: subscriptionId,
+    periodStart,
+    periodEnd,
   }, context);
 
   await activateVendor(db, vendorId, {
     customerId: asStripeId(session.customer),
     subscriptionId,
     priceId: subscriptionPriceId(subscription),
+    periodStart,
     periodEnd,
+    status: subscription?.status || "active",
+    cancelAtPeriodEnd: subscription?.cancel_at_period_end === true,
   }, context);
 
   return true;
@@ -422,15 +463,19 @@ async function handleInvoicePaid(db, stripe, event) {
 
   const subscription = await retrieveSubscription(stripe, subscriptionId, context);
   const vendorId = subscription
-    ? await vendorIdFromSubscription(db, subscription)
+    ? await vendorIdFromSubscription(db, subscription, context)
     : await vendorIdFromInvoice(db, invoice);
   const vendorUser = await requireVendorUser(db, vendorId, context);
 
-  const periodEnd = periodEndOrFallback(
-    subscriptionPeriodEnd(subscription),
-    invoicePeriodEnd(invoice),
-  );
-  log("period_end_resolved", { ...context, periodEnd: periodEnd.toISOString() });
+  const invoiceDates = invoicePeriodDatesFromStripe(invoice);
+  const subscriptionDates = subscriptionPeriodDatesFromStripe(subscription);
+  const periodStart = firstDate(invoiceDates.periodStart, subscriptionDates.currentPeriodStart);
+  const periodEnd = firstDate(invoiceDates.periodEnd, subscriptionDates.currentPeriodEnd);
+  log("period_resolved", {
+    ...context,
+    periodStart: periodStart ? periodStart.toISOString() : null,
+    periodEnd: periodEnd ? periodEnd.toISOString() : null,
+  });
 
   await saveTransaction(db, {
     vendorId: vendorUser._id,
@@ -439,13 +484,18 @@ async function handleInvoicePaid(db, stripe, event) {
     status: "paid",
     stripeInvoiceId: invoice.id,
     stripeSubscriptionId: subscriptionId,
+    periodStart,
+    periodEnd,
   }, context);
 
   await activateVendor(db, vendorId, {
     customerId: asStripeId(invoice.customer) || asStripeId(subscription?.customer),
     subscriptionId,
     priceId: subscriptionPriceId(subscription),
+    periodStart,
     periodEnd,
+    status: subscription?.status || "active",
+    cancelAtPeriodEnd: subscription?.cancel_at_period_end === true,
   }, context);
 
   return true;
@@ -461,22 +511,34 @@ async function handleSubscriptionUpdated(db, event) {
     cancelAtPeriodEnd: subscription?.cancel_at_period_end,
   });
 
-  const vendorId = await vendorIdFromSubscription(db, subscription);
+  const vendorId = await vendorIdFromSubscription(db, subscription, context);
   await requireVendorUser(db, vendorId, context);
 
-  const periodEnd = subscriptionPeriodEnd(subscription);
-  if (["canceled", "unpaid", "incomplete_expired"].includes(subscription.status)) {
-    await endSubscriptionAccess(db, vendorId, periodEnd, context);
-  } else {
-    const expiry = periodEndOrFallback(periodEnd);
-    log("period_end_resolved", { ...context, periodEnd: expiry.toISOString() });
-    await activateVendor(db, vendorId, {
-      customerId: asStripeId(subscription.customer),
-      subscriptionId: subscription.id,
-      priceId: subscriptionPriceId(subscription),
-      periodEnd: expiry,
-    }, context);
+  const { currentPeriodStart, currentPeriodEnd } = subscriptionPeriodDatesFromStripe(subscription);
+  const cancelAtPeriodEnd = subscription.cancel_at_period_end === true;
+  const status = subscription.status || "active";
+
+  if (["canceled", "unpaid", "incomplete_expired"].includes(status)) {
+    // These statuses mean access has ended, not merely that a cancellation is
+    // scheduled. Stripe sends customer.subscription.deleted at period end too.
+    await downgradeVendor(db, vendorId, context, status);
+    return true;
   }
+
+  log("period_resolved", {
+    ...context,
+    periodStart: currentPeriodStart ? currentPeriodStart.toISOString() : null,
+    periodEnd: currentPeriodEnd ? currentPeriodEnd.toISOString() : null,
+  });
+  await activateVendor(db, vendorId, {
+    customerId: asStripeId(subscription.customer),
+    subscriptionId: subscription.id,
+    priceId: subscriptionPriceId(subscription),
+    periodStart: currentPeriodStart,
+    periodEnd: currentPeriodEnd,
+    status,
+    cancelAtPeriodEnd,
+  }, context);
   return true;
 }
 
@@ -488,10 +550,14 @@ async function handleSubscriptionDeleted(db, event) {
     subscriptionId: subscription?.id,
     status: subscription?.status,
   });
+  const vendorId = await vendorIdFromSubscription(db, subscription, context);
+  const vendorUser = await findVendorUser(db, vendorId);
+  if (!vendorUser) {
+    logError("vendor_user_not_found", { ...context, vendorId });
+    throw new Error(`No user found for vendorId ${vendorId}`);
+  }
 
-  const vendorId = await vendorIdFromSubscription(db, subscription);
-  await requireVendorUser(db, vendorId, context);
-  await endSubscriptionAccess(db, vendorId, subscriptionPeriodEnd(subscription), context);
+  await downgradeVendor(db, vendorId, context, "canceled");
   return true;
 }
 
@@ -527,9 +593,14 @@ async function handleInvoicePaymentFailed(db, stripe, event) {
   const subscriptionId = asStripeId(invoice.subscription);
   const subscription = await retrieveSubscription(stripe, subscriptionId, context);
   const vendorId = subscription
-    ? await vendorIdFromSubscription(db, subscription)
+    ? await vendorIdFromSubscription(db, subscription, context)
     : await vendorIdFromInvoice(db, invoice);
   const vendorUser = await requireVendorUser(db, vendorId, context);
+
+  const invoiceDates = invoicePeriodDatesFromStripe(invoice);
+  const subscriptionDates = subscriptionPeriodDatesFromStripe(subscription);
+  const periodStart = firstDate(invoiceDates.periodStart, subscriptionDates.currentPeriodStart);
+  const periodEnd = firstDate(invoiceDates.periodEnd, subscriptionDates.currentPeriodEnd);
 
   await saveTransaction(db, {
     vendorId: vendorUser._id,
@@ -538,27 +609,74 @@ async function handleInvoicePaymentFailed(db, stripe, event) {
     status: "failed",
     stripeInvoiceId: invoice.id,
     stripeSubscriptionId: subscriptionId,
+    periodStart,
+    periodEnd,
   }, context);
+
+  const status = subscription?.status || null;
+  if (!subscription || ["canceled", "unpaid", "incomplete_expired"].includes(status)) {
+    await downgradeVendor(db, vendorId, context, status || "unpaid");
+  } else if (status === "past_due") {
+    await activateVendor(db, vendorId, {
+      customerId: asStripeId(invoice.customer) || asStripeId(subscription?.customer),
+      subscriptionId,
+      priceId: subscriptionPriceId(subscription),
+      periodStart,
+      periodEnd,
+      status: "past_due",
+      cancelAtPeriodEnd: subscription.cancel_at_period_end === true,
+    }, context);
+  }
   return true;
 }
 
 export async function processStripeEvent(event, { db, stripe }) {
-  switch (event.type) {
-    case "checkout.session.completed":
-      return handleCheckoutSessionCompleted(db, stripe, event);
-    case "invoice.paid":
-      return handleInvoicePaid(db, stripe, event);
-    case "customer.subscription.updated":
-      return handleSubscriptionUpdated(db, event);
-    case "customer.subscription.deleted":
-      return handleSubscriptionDeleted(db, event);
-    case "checkout.session.async_payment_failed":
-      return handleAsyncPaymentFailed(db, event);
-    case "invoice.payment_failed":
-      return handleInvoicePaymentFailed(db, stripe, event);
-    default:
-      log("event_ignored", { eventId: event.id, type: event.type });
-      return false;
+  const knownTypes = [
+    "checkout.session.completed",
+    "invoice.paid",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "checkout.session.async_payment_failed",
+    "invoice.payment_failed",
+  ];
+  if (!knownTypes.includes(event.type)) {
+    log("event_ignored", { eventId: event.id, type: event.type });
+    return false;
+  }
+
+  const { claimed, eventId } = await claimEvent(db, event);
+  if (!claimed) {
+    log("event_duplicate", { eventId, type: event.type });
+    return false;
+  }
+
+  try {
+    let handled = false;
+    switch (event.type) {
+      case "checkout.session.completed":
+        handled = await handleCheckoutSessionCompleted(db, stripe, event);
+        break;
+      case "invoice.paid":
+        handled = await handleInvoicePaid(db, stripe, event);
+        break;
+      case "customer.subscription.updated":
+        handled = await handleSubscriptionUpdated(db, event);
+        break;
+      case "customer.subscription.deleted":
+        handled = await handleSubscriptionDeleted(db, event);
+        break;
+      case "checkout.session.async_payment_failed":
+        handled = await handleAsyncPaymentFailed(db, event);
+        break;
+      case "invoice.payment_failed":
+        handled = await handleInvoicePaymentFailed(db, stripe, event);
+        break;
+    }
+    log("event_recorded", { eventId, type: event.type });
+    return handled;
+  } catch (error) {
+    await releaseEvent(db, eventId);
+    throw error;
   }
 }
 
