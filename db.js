@@ -41,7 +41,7 @@ export async function initDatabase() {
     const database = await connectDB();
     const existing = await database.listCollections({}, { nameOnly: true }).toArray();
     const existingNames = new Set(existing.map((collection) => collection.name));
-    const businessCollections = ["services", "bookings", "transactions"];
+    const businessCollections = ["services", "bookings", "transactions", "stripeEvents"];
 
     for (const name of businessCollections) {
       if (existingNames.has(name)) continue;
