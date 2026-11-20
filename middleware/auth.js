@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db.js";
-import { sendResponse } from "../helpers.js";
+import { getCancelAtPeriodEnd, getCurrentPeriodEnd, getEffectivePlan, getStoredStatus, sendResponse } from "../helpers.js";
 import { sendUnauthorized } from "./unauthorized.js";
 import { verifyToken } from "../verifyJwt.js";
 
@@ -97,11 +97,21 @@ export async function requireAuth(req, res, next) {
     // Blocking is always enforced from the database, never from token claims.
     if (user.isBlocked === true) return sendResponse(res, 403, false, "Your account is blocked");
 
+    const plan = getEffectivePlan(user);
+    const storedStatus = getStoredStatus(user);
     req.user = {
       ...user,
       role: ["vendor", "customer", "admin"].includes(user.role) ? user.role : "customer",
       isBlocked: user.isBlocked === true,
-      subscriptionPlan: user.subscriptionPlan === "premium" ? "premium" : "free",
+      // Normalize every plan read through the single source of truth.
+      plan,
+      subscriptionPlan: plan,
+      status: storedStatus,
+      subscriptionStatus: storedStatus,
+      cancelAtPeriodEnd: getCancelAtPeriodEnd(user) === true,
+      currentPeriodEnd: getCurrentPeriodEnd(user),
+      isPremium: plan === "premium",
+      isFeatured: plan === "premium",
     };
     return next();
   } catch (error) {
