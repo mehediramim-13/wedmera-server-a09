@@ -3,22 +3,14 @@ import { z } from "zod";
 import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { validateBody } from "../middleware/validate.js";
-import { getEffectivePlan, safeUser, sendResponse } from "../helpers.js";
+import { safeUser, sendResponse } from "../helpers.js";
 
 const router = Router();
 
 router.use(requireAuth);
 
 router.get("/me", (req, res) => {
-  const user = safeUser(req.user);
-  const plan = getEffectivePlan(req.user);
-  sendResponse(res, 200, true, "Profile fetched.", {
-    ...user,
-    subscriptionPlan: plan,
-    plan,
-    currentPlan: plan,
-    effectivePlan: plan,
-  });
+  sendResponse(res, 200, true, "Profile fetched.", safeUser(req.user));
 });
 
 const profileSchema = z.object({
@@ -37,14 +29,7 @@ router.patch("/me", validateBody(profileSchema), async (req, res, next) => {
       { $set: { ...req.validated, updatedAt: new Date() } },
     );
     const updated = await getDb().collection(process.env.USERS_COLLECTION || "user").findOne({ _id: req.user._id });
-    const plan = getEffectivePlan(updated);
-    sendResponse(res, 200, true, "Profile updated.", {
-      ...safeUser(updated),
-      subscriptionPlan: plan,
-      plan,
-      currentPlan: plan,
-      effectivePlan: plan,
-    });
+    sendResponse(res, 200, true, "Profile updated.", safeUser(updated));
   } catch (error) { next(error); }
 });
 
