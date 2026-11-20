@@ -1,43 +1,56 @@
 import { Router } from "express";
+import Stripe from "stripe";
 import { z } from "zod";
 import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/roles.js";
 import { validateBody } from "../middleware/validate.js";
-import { getEffectivePlan, isValidObjectId, sendResponse, SERVICE_CATEGORIES, toObjectId } from "../helpers.js";
+import { buildVendorPlanUpdate, countActiveServices, getFreePlanServiceLimit, getCurrentPeriodEnd, getCurrentPeriodStart, getEffectivePlan, isValidObjectId, sendResponse, SERVICE_CATEGORIES, subscriptionPeriodDatesFromStripe, subscriptionResponse, toIsoOrNull, toObjectId, vendorIdQuery } from "../helpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("vendor"));
 
+function getStripe() {
+  if (!process.env.STRIPE_SECRET_KEY) throw new Error("Missing required environment variable: STRIPE_SECRET_KEY");
+  return new Stripe(process.env.STRIPE_SECRET_KEY);
+}
+
 router.get("/overview", async (req, res, next) => {
   try {
     const db = getDb();
-    const [totalServices, activeServices, pendingBookingRequests, acceptedBookings] = await Promise.all([
-      db.collection("services").countDocuments({ vendorId: req.user._id }),
-      db.collection("services").countDocuments({ vendorId: req.user._id, isActive: { $ne: false } }),
+    const [totalServices, activeServicesCount, pendingBookingRequests, acceptedBookings] = await Promise.all([
+      db.collection("services").countDocuments({ vendorId: vendorIdQuery(req.user._id) }),
+      countActiveServices(db, req.user._id),
       db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Pending" }),
       db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Accepted" }),
     ]);
-    const plan = getEffectivePlan(req.user);
-    const expiresAt = req.user.subscriptionExpiresAt || null;
     sendResponse(res, 200, true, "Vendor overview fetched.", {
-      totalServices, activeServices, pendingBookingRequests, acceptedBookings,
-      plan,
-      currentPlan: plan,
-      subscriptionPlan: plan,
-      effectivePlan: plan,
-      expiresAt,
-      subscriptionExpiresAt: expiresAt,
+      totalServices,
+      activeServices: activeServicesCount,
+      activeServicesCount,
+      pendingBookingRequests,
+      acceptedBookings,
+      ...subscriptionResponse(req.user),
     });
   } catch (error) { next(error); }
 });
 
 router.get("/services", async (req, res, next) => {
   try {
-    const items = await getDb().collection("services").find({ vendorId: req.user._id }).sort({ createdAt: -1 }).toArray();
-    const plan = getEffectivePlan(req.user);
+    const items = await getDb().collection("services").find({ vendorId: vendorIdQuery(req.user._id) }).sort({ createdAt: -1 }).toArray();
+    const subscription = subscriptionResponse(req.user);
     sendResponse(res, 200, true, "Vendor services fetched.",
-      items.map((item) => ({ ...item, isPremium: plan === "premium", subscriptionPlan: plan })));
+      items.map((item) => ({
+        ...item,
+        // Legacy services have no isActive field; expose them as active so the
+        // plans page and vendor UI agree with the server-side count.
+        isActive: item.isActive !== false,
+        isPremium: subscription.plan === "premium",
+        subscriptionPlan: subscription.plan,
+        subscriptionStatus: subscription.status,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+        currentPeriodEnd: subscription.currentPeriodEnd,
+      })));
   } catch (error) { next(error); }
 });
 
@@ -54,11 +67,10 @@ router.post("/services", validateBody(createServiceSchema), async (req, res, nex
   try {
     const db = getDb();
     if (getEffectivePlan(req.user) === "free") {
-      const count = await db.collection("services").countDocuments({
-        vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
-      });
-      if (count >= Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3)) {
-        return sendResponse(res, 403, false, "Free plan limit reached (3 active services). Upgrade to Premium");
+      const count = await countActiveServices(db, req.user._id);
+      const limit = getFreePlanServiceLimit();
+      if (count >= limit) {
+        return sendResponse(res, 403, false, `Free plan limit reached (${limit} active services). Upgrade to Premium`);
       }
     }
     const now = new Date();
@@ -93,7 +105,7 @@ router.patch("/services/:id", validateBody(updateServiceSchema), async (req, res
     if (!service) return sendResponse(res, 404, false, "Service not found.");
     if (String(service.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     const result = await db.collection("services").findOneAndUpdate(
-      { _id: id, vendorId: req.user._id },
+      { _id: id, vendorId: vendorIdQuery(req.user._id) },
       { $set: { ...req.validated, status: "Pending", updatedAt: new Date() } },
       { returnDocument: "after" },
     );
@@ -106,23 +118,22 @@ router.patch("/services/:id/availability", validateBody(z.object({ isActive: z.b
   try {
     const db = getDb();
     const id = toObjectId(req.params.id);
-    const service = await db.collection("services").findOne({ _id: id });
+    const service = await db.collection("services").findOne({ _id: id, vendorId: vendorIdQuery(req.user._id) });
     if (!service) return sendResponse(res, 404, false, "Service not found.");
     if (String(service.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     if (req.validated.isActive === true && getEffectivePlan(req.user) === "free") {
-      const count = await db.collection("services").countDocuments({
-        vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" }, _id: { $ne: id },
-      });
-      if (count >= Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3)) {
-        return sendResponse(res, 403, false, "Free plan limit reached (3 active services). Upgrade to Premium");
+      const count = await countActiveServices(db, req.user._id, { excludeServiceId: id });
+      const limit = getFreePlanServiceLimit();
+      if (count >= limit) {
+        return sendResponse(res, 403, false, `Free plan limit reached (${limit} active services). Upgrade to Premium`);
       }
     }
     const result = await db.collection("services").findOneAndUpdate(
-      { _id: id, vendorId: req.user._id },
+      { _id: id, vendorId: vendorIdQuery(req.user._id) },
       { $set: { isActive: req.validated.isActive, updatedAt: new Date() } },
       { returnDocument: "after" },
     );
-    sendResponse(res, 200, true, "Availability updated.", result);
+    sendResponse(res, 200, true, "Availability updated.", result ? { ...result, isActive: result.isActive !== false } : result);
   } catch (error) { next(error); }
 });
 
@@ -138,14 +149,14 @@ router.delete("/services/:id", async (req, res, next) => {
       { serviceId: id, status: "Pending" },
       { $set: { status: "Cancelled", updatedAt: new Date() } },
     );
-    await db.collection("services").deleteOne({ _id: id, vendorId: req.user._id });
+    await db.collection("services").deleteOne({ _id: id, vendorId: vendorIdQuery(req.user._id) });
     sendResponse(res, 200, true, "Service deleted.");
   } catch (error) { next(error); }
 });
 
 router.get("/bookings", async (req, res, next) => {
   try {
-    const filter = { vendorId: req.user._id };
+    const filter = { vendorId: vendorIdQuery(req.user._id) };
     if (req.query.status) filter.status = req.query.status;
     const bookings = await getDb().collection("bookings").find(filter).sort({ createdAt: -1 }).toArray();
     const ids = [...new Set(bookings.map((b) => b.customerId))];
@@ -175,7 +186,7 @@ async function processVendorBooking(req, res, next, status) {
     if (String(booking.vendorId) !== String(req.user._id)) return sendResponse(res, 403, false, "Forbidden.");
     if (booking.status !== "Pending") return sendResponse(res, 409, false, "Booking has already been processed.");
     const result = await db.collection("bookings").findOneAndUpdate(
-      { _id: id, vendorId: req.user._id, status: "Pending" },
+      { _id: id, vendorId: vendorIdQuery(req.user._id), status: "Pending" },
       { $set: { status, updatedAt: new Date() } },
       { returnDocument: "after" },
     );
@@ -190,28 +201,54 @@ router.patch("/bookings/:id/reject", (req, res, next) => processVendorBooking(re
 router.get("/subscription", async (req, res, next) => {
   try {
     const db = getDb();
-    const activeServicesCount = await db.collection("services").countDocuments({
-      vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
-    });
-    const plan = getEffectivePlan(req.user);
-    const expiresAt = req.user.subscriptionExpiresAt || null;
+    const activeServicesCount = await countActiveServices(db, req.user._id);
     sendResponse(res, 200, true, "Subscription fetched.", {
-      plan,
-      subscriptionPlan: plan,
-      currentPlan: plan,
-      effectivePlan: plan,
-      expiresAt,
-      subscriptionExpiresAt: expiresAt,
-      limits: { activeServices: Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3) },
-      activeServicesCount,
+      ...subscriptionResponse(req.user, {
+        limits: { activeServices: getFreePlanServiceLimit() },
+        activeServicesCount,
+      }),
     });
+  } catch (error) { next(error); }
+});
+
+router.post("/subscription/resume", async (req, res, next) => {
+  try {
+    if (!req.user.stripeSubscriptionId) {
+      return sendResponse(res, 404, false, "No subscription found to resume.");
+    }
+
+    // Resume the existing Stripe subscription in place. Do not create a new
+    // Checkout Session, which would otherwise charge the vendor again.
+    const stripe = getStripe();
+    const subscription = await stripe.subscriptions.update(req.user.stripeSubscriptionId, {
+      cancel_at_period_end: false,
+    });
+
+    const stripeDates = subscriptionPeriodDatesFromStripe(subscription);
+    const periodStart = stripeDates.currentPeriodStart || getCurrentPeriodStart(req.user);
+    const periodEnd = stripeDates.currentPeriodEnd || getCurrentPeriodEnd(req.user);
+    const users = getDb().collection(process.env.USERS_COLLECTION || "user");
+    await users.updateOne(
+      { _id: req.user._id },
+      {
+        $set: buildVendorPlanUpdate({
+          status: subscription?.status || "active",
+          cancelAtPeriodEnd: false,
+          currentPeriodStart: periodStart,
+          currentPeriodEnd: periodEnd,
+        }),
+      },
+    );
+
+    const user = await users.findOne({ _id: req.user._id });
+    sendResponse(res, 200, true, "Subscription resumed.", subscriptionResponse(user));
   } catch (error) { next(error); }
 });
 
 router.get("/transactions", async (req, res, next) => {
   try {
     const transactions = await getDb().collection("transactions")
-      .find({ vendorId: req.user._id })
+      .find({ vendorId: vendorIdQuery(req.user._id) })
       .sort({ createdAt: -1 })
       .limit(200)
       .toArray();
@@ -228,6 +265,8 @@ router.get("/transactions", async (req, res, next) => {
         amount: Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0,
         currency: (transaction.currency || "usd").toLowerCase(),
         status: transaction.status || "paid",
+        periodStart: toIsoOrNull(transaction.periodStart),
+        periodEnd: toIsoOrNull(transaction.periodEnd),
         date: transaction.createdAt || transaction.date || null,
       };
     });
