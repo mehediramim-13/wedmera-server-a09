@@ -103,7 +103,11 @@ async function getJson(path, token) {
   const res = await fetch(`${base}${path}`, {
     headers: token ? { authorization: `Bearer ${token}` } : {},
   });
-  return { status: res.status, body: await res.json() };
+  return {
+    status: res.status,
+    body: await res.json(),
+    cacheControl: res.headers.get("cache-control"),
+  };
 }
 
 const checkoutEvent = (vendorId, {
@@ -417,16 +421,24 @@ test("Stripe subscriptions activate Premium only from confirmed webhooks and exp
   await t.test("returns the saved checkout transaction to its owner only", async () => {
     const owner = await getJson("/api/payments/session/cs_test_a", vendorA.token);
     assert.equal(owner.status, 200);
+    assert.equal(owner.cacheControl, "no-store");
+    assert.equal(owner.body.success, true);
     assert.equal(owner.body.data.status, "paid");
-    assert.equal(owner.body.data.plan, "premium");
-    assert.equal(owner.body.data.amount, 49);
+    assert.ok(owner.body.data.transaction);
+    assert.equal(String(owner.body.data.transaction.vendorId), String(vendorA.user._id));
+    assert.equal(owner.body.data.transaction.plan, "premium");
+    assert.equal(owner.body.data.transaction.amount, 49);
+    assert.equal(owner.body.data.transaction.status, "paid");
 
     const otherVendor = await getJson("/api/payments/session/cs_test_a", vendorB.token);
     assert.equal(otherVendor.status, 200);
+    assert.equal(otherVendor.cacheControl, "no-store");
     assert.equal(otherVendor.body.data.status, "processing");
+    assert.equal(otherVendor.body.data.transaction, undefined);
 
     const missing = await getJson("/api/payments/session/cs_missing", vendorA.token);
     assert.equal(missing.status, 200);
+    assert.equal(missing.cacheControl, "no-store");
     assert.equal(missing.body.data.status, "processing");
   });
 

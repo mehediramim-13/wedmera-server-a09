@@ -100,19 +100,43 @@ router.post("/create-checkout-session", async (req, res, next) => {
 });
 
 router.get("/session/:sessionId", async (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  const sessionId = req.params.sessionId;
+  const vendorId = req.user._id;
+
   try {
     const transaction = await getDb().collection("transactions").findOne({
-      stripeSessionId: req.params.sessionId,
-      vendorId: req.user._id,
+      stripeSessionId: sessionId,
     });
-    if (!transaction) return sendResponse(res, 200, true, "Payment is processing.", { status: "processing" });
-    sendResponse(res, 200, true, "Payment status fetched.", {
-      status: transaction.status,
-      plan: transaction.plan,
-      amount: transaction.amount,
-      currency: transaction.currency,
-      createdAt: transaction.createdAt,
-    });
+    if (transaction && String(transaction.vendorId) === String(vendorId)) {
+      return sendResponse(res, 200, true, "Payment status fetched.", {
+        status: "paid",
+        transaction,
+      });
+    }
+
+    // The webhook may not have saved the transaction yet. Retrieve the Checkout
+    // Session read-only so the success page can show a safe processing state.
+    // This endpoint never writes subscription or payment state.
+    let session = null;
+    try {
+      session = await getStripe().checkout.sessions.retrieve(sessionId);
+    } catch (error) {
+      console.error(`[payments-session] Stripe retrieval failed for ${sessionId}: ${error?.message || error}`);
+    }
+
+    if (session) {
+      const ownerId = session.metadata?.vendorId || session.client_reference_id;
+      if (!ownerId || String(ownerId) !== String(vendorId)) {
+        return sendResponse(res, 403, false, "Forbidden.");
+      }
+      return sendResponse(res, 200, true, "Payment is processing.", {
+        status: "processing",
+        paymentStatus: session.payment_status,
+      });
+    }
+
+    return sendResponse(res, 200, true, "Payment is processing.", { status: "processing" });
   } catch (error) { next(error); }
 });
 
