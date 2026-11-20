@@ -61,7 +61,12 @@ export async function initDatabase() {
       database.collection("bookings").createIndex({ vendorId: 1 }),
       database.collection("bookings").createIndex({ serviceId: 1, eventDate: 1 }),
       database.collection("transactions").createIndex({ stripeSessionId: 1 }, { unique: true }),
+      database.collection("transactions").createIndex(
+        { paymentKey: 1 },
+        { unique: true, partialFilterExpression: { paymentKey: { $type: "string" } } },
+      ),
       database.collection("transactions").createIndex({ vendorId: 1 }),
+      database.collection("transactions").createIndex({ vendorId: 1, createdAt: -1 }),
     ]);
 
     return database;

@@ -127,6 +127,7 @@ Never commit `.env`.
 | PATCH | `/api/vendor/bookings/:id/accept` | Vendor/owner |
 | PATCH | `/api/vendor/bookings/:id/reject` | Vendor/owner |
 | GET | `/api/vendor/subscription` | Vendor |
+| GET | `/api/vendor/transactions` | Vendor/owner |
 | POST | `/api/payments/create-checkout-session` | Vendor |
 | GET | `/api/payments/session/:sessionId` | Vendor/owner |
 | POST | `/api/payments/cancel-subscription` | Vendor |

@@ -40,6 +40,21 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
+const ensureDB = async (req, res, next) => {
+  try {
+    await connectDB();
+    await initDatabase();
+    next();
+  } catch (error) {
+    console.error("MongoDB request initialization failed:", error.message);
+    next(error);
+  }
+};
+
+// Stripe signature verification needs the exact raw request bytes. Mount the
+// webhook route before express.json() so the body is not parsed first.
+app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), ensureDB, webhookRoutes);
+
 app.use(express.json({ limit: "1mb" }));
 app.get("/", (req, res) => {
   sendResponse(res, 200, true, "WedMera API is running.");
@@ -63,18 +78,6 @@ app.get("/api/health/db", async (req, res) => {
   }
 });
 
-const ensureDB = async (req, res, next) => {
-  try {
-    await connectDB();
-    await initDatabase();
-    next();
-  } catch (error) {
-    console.error("MongoDB request initialization failed:", error.message);
-    next(error);
-  }
-};
-
-app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), ensureDB, webhookRoutes);
 app.use("/api", ensureDB);
 // Mount the private service-details router before the public router so
 // /api/services/:id can never be shadowed by a public /api/services route.

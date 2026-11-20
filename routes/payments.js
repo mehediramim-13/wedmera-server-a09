@@ -13,14 +13,70 @@ function getStripe() {
   return new Stripe(process.env.STRIPE_SECRET_KEY);
 }
 
+const validatedPriceIds = new Set();
+
+function checkoutConfigError(message) {
+  const error = new Error(message);
+  error.status = 500;
+  error.expose = true;
+  return error;
+}
+
+// Stripe Checkout expects a Price ID (price_...), never a Product ID (prod_...).
+// Validate the configured value once per Price ID so a bad config yields a clear
+// server error instead of an opaque Stripe failure on every checkout attempt.
+async function resolvePremiumPriceId(stripe) {
+  const priceId = (process.env.STRIPE_PRICE_ID || "").trim();
+  if (!priceId) {
+    throw checkoutConfigError(
+      "Stripe is not configured: STRIPE_PRICE_ID is missing. Set it to the recurring USD $49/month Price ID (price_...).",
+    );
+  }
+  if (priceId.startsWith("prod_")) {
+    throw checkoutConfigError(
+      "Stripe is misconfigured: STRIPE_PRICE_ID contains a Product ID (prod_...). Set it to that product's recurring USD $49/month Price ID (price_...).",
+    );
+  }
+  if (!priceId.startsWith("price_")) {
+    throw checkoutConfigError(
+      'Stripe is misconfigured: STRIPE_PRICE_ID must be a Price ID starting with "price_".',
+    );
+  }
+  if (validatedPriceIds.has(priceId)) return priceId;
+
+  let price;
+  try {
+    price = await stripe.prices.retrieve(priceId);
+  } catch (error) {
+    if (error?.code === "resource_missing") {
+      throw checkoutConfigError(
+        "Stripe is misconfigured: STRIPE_PRICE_ID does not match a Price in the Stripe account. Set it to a valid recurring Price ID (price_...).",
+      );
+    }
+    throw error;
+  }
+  if (!price.active) {
+    throw checkoutConfigError("Stripe is misconfigured: the Price referenced by STRIPE_PRICE_ID is inactive.");
+  }
+  if (!price.recurring) {
+    throw checkoutConfigError(
+      "Stripe is misconfigured: the Price referenced by STRIPE_PRICE_ID is not a recurring price, but checkout uses subscription mode.",
+    );
+  }
+
+  validatedPriceIds.add(priceId);
+  return priceId;
+}
+
 router.post("/create-checkout-session", async (req, res, next) => {
   try {
     if (getEffectivePlan(req.user) === "premium") return sendResponse(res, 409, false, "Already subscribed to Premium.");
     const stripe = getStripe();
+    const priceId = await resolvePremiumPriceId(stripe);
     const clientUrl = process.env.CLIENT_URL.split(",")[0].trim().replace(/\/+$/, "");
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
-      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       customer_email: req.user.email,
       client_reference_id: String(req.user._id),
       metadata: { vendorId: String(req.user._id), plan: "premium" },
@@ -29,7 +85,18 @@ router.post("/create-checkout-session", async (req, res, next) => {
       cancel_url: `${clientUrl}/payment/cancel`,
     });
     sendResponse(res, 200, true, "Checkout session created.", { url: session.url });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error?.expose) {
+      console.error(`Stripe checkout configuration error: ${error.message}`);
+      return sendResponse(res, error.status || 500, false, error.message);
+    }
+    // A Price can disappear between validation and session creation. Surface it
+    // as a configuration problem instead of an opaque server error.
+    if (error?.code === "resource_missing" && /price/i.test(error?.message || "")) {
+      return sendResponse(res, 500, false, "Stripe is misconfigured: STRIPE_PRICE_ID does not reference an existing Price.");
+    }
+    next(error);
+  }
 });
 
 router.get("/session/:sessionId", async (req, res, next) => {

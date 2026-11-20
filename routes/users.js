@@ -11,9 +11,13 @@ router.use(requireAuth);
 
 router.get("/me", (req, res) => {
   const user = safeUser(req.user);
+  const plan = getEffectivePlan(req.user);
   sendResponse(res, 200, true, "Profile fetched.", {
     ...user,
-    effectivePlan: getEffectivePlan(req.user),
+    subscriptionPlan: plan,
+    plan,
+    currentPlan: plan,
+    effectivePlan: plan,
   });
 });
 
@@ -33,9 +37,13 @@ router.patch("/me", validateBody(profileSchema), async (req, res, next) => {
       { $set: { ...req.validated, updatedAt: new Date() } },
     );
     const updated = await getDb().collection(process.env.USERS_COLLECTION || "user").findOne({ _id: req.user._id });
+    const plan = getEffectivePlan(updated);
     sendResponse(res, 200, true, "Profile updated.", {
       ...safeUser(updated),
-      effectivePlan: getEffectivePlan(updated),
+      subscriptionPlan: plan,
+      plan,
+      currentPlan: plan,
+      effectivePlan: plan,
     });
   } catch (error) { next(error); }
 });

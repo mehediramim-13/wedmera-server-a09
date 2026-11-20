@@ -18,10 +18,16 @@ router.get("/overview", async (req, res, next) => {
       db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Pending" }),
       db.collection("bookings").countDocuments({ vendorId: req.user._id, status: "Accepted" }),
     ]);
+    const plan = getEffectivePlan(req.user);
+    const expiresAt = req.user.subscriptionExpiresAt || null;
     sendResponse(res, 200, true, "Vendor overview fetched.", {
       totalServices, activeServices, pendingBookingRequests, acceptedBookings,
-      currentPlan: getEffectivePlan(req.user),
-      subscriptionExpiresAt: req.user.subscriptionExpiresAt || null,
+      plan,
+      currentPlan: plan,
+      subscriptionPlan: plan,
+      effectivePlan: plan,
+      expiresAt,
+      subscriptionExpiresAt: expiresAt,
     });
   } catch (error) { next(error); }
 });
@@ -29,7 +35,9 @@ router.get("/overview", async (req, res, next) => {
 router.get("/services", async (req, res, next) => {
   try {
     const items = await getDb().collection("services").find({ vendorId: req.user._id }).sort({ createdAt: -1 }).toArray();
-    sendResponse(res, 200, true, "Vendor services fetched.", items);
+    const plan = getEffectivePlan(req.user);
+    sendResponse(res, 200, true, "Vendor services fetched.",
+      items.map((item) => ({ ...item, isPremium: plan === "premium", subscriptionPlan: plan })));
   } catch (error) { next(error); }
 });
 
@@ -185,13 +193,45 @@ router.get("/subscription", async (req, res, next) => {
     const activeServicesCount = await db.collection("services").countDocuments({
       vendorId: req.user._id, isActive: { $ne: false }, status: { $ne: "Rejected" },
     });
+    const plan = getEffectivePlan(req.user);
+    const expiresAt = req.user.subscriptionExpiresAt || null;
     sendResponse(res, 200, true, "Subscription fetched.", {
-      plan: req.user.subscriptionPlan === "premium" ? "premium" : "free",
-      effectivePlan: getEffectivePlan(req.user),
-      expiresAt: req.user.subscriptionExpiresAt || null,
+      plan,
+      subscriptionPlan: plan,
+      currentPlan: plan,
+      effectivePlan: plan,
+      expiresAt,
+      subscriptionExpiresAt: expiresAt,
       limits: { activeServices: Number(process.env.FREE_PLAN_SERVICE_LIMIT || 3) },
       activeServicesCount,
     });
+  } catch (error) { next(error); }
+});
+
+router.get("/transactions", async (req, res, next) => {
+  try {
+    const transactions = await getDb().collection("transactions")
+      .find({ vendorId: req.user._id })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .toArray();
+    const items = transactions.map((transaction) => {
+      const plan = transaction.plan || transaction.subscriptionPlan || "premium";
+      const amount = typeof transaction.amount === "number"
+        ? transaction.amount
+        : Number(transaction.amount || 0);
+      return {
+        ...transaction,
+        id: String(transaction._id),
+        plan,
+        subscriptionPlan: transaction.subscriptionPlan || plan,
+        amount: Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0,
+        currency: (transaction.currency || "usd").toLowerCase(),
+        status: transaction.status || "paid",
+        date: transaction.createdAt || transaction.date || null,
+      };
+    });
+    sendResponse(res, 200, true, "Vendor transactions fetched.", items);
   } catch (error) { next(error); }
 });
 

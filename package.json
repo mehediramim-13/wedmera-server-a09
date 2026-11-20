@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node --watch index.js",
     "start": "node index.js",
+    "test": "node --test scripts/testSubscriptions.test.mjs",
+    "test:subscriptions": "node --test scripts/testSubscriptions.test.mjs",
     "seed:admin": "node scripts/seedAdmin.js",
     "test:admin-services": "node scripts/testAdminServiceStatus.mjs"
   },
