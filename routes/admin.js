@@ -4,10 +4,14 @@ import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/roles.js";
 import { validateBody } from "../middleware/validate.js";
-import { escapeRegex, isValidObjectId, sendResponse, toObjectId, SERVICE_CATEGORIES } from "../helpers.js";
+import { escapeRegex, isValidObjectId, sendResponse, subscriptionResponse, toIsoOrNull, toObjectId, SERVICE_CATEGORIES } from "../helpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
+
+function withEffectivePlan(user) {
+  return { ...user, ...subscriptionResponse(user) };
+}
 
 router.get("/overview", async (req, res, next) => {
   try {
@@ -45,11 +49,13 @@ router.get("/users", async (req, res, next) => {
     if (req.query.role) filter.role = req.query.role;
     const users = getDb().collection(process.env.USERS_COLLECTION || "user");
     const [items, total] = await Promise.all([
-      users.find(filter, { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1 } })
+      users.find(filter, { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } })
         .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
       users.countDocuments(filter),
     ]);
-    sendResponse(res, 200, true, "Users fetched.", { items, total, page, limit, pages: Math.ceil(total / limit) });
+    sendResponse(res, 200, true, "Users fetched.", {
+      items: items.map(withEffectivePlan), total, page, limit, pages: Math.ceil(total / limit),
+    });
   } catch (error) { next(error); }
 });
 
@@ -59,14 +65,17 @@ router.get("/users/:id", async (req, res, next) => {
     const db = getDb();
     const user = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
       { _id: toObjectId(req.params.id) },
-      { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1 } },
+      { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
     );
     if (!user) return sendResponse(res, 404, false, "User not found.");
     const [servicesCount, bookingsCount] = await Promise.all([
       db.collection("services").countDocuments({ vendorId: user._id }),
       db.collection("bookings").countDocuments({ $or: [{ customerId: user._id }, { vendorId: user._id }] }),
     ]);
-    sendResponse(res, 200, true, "User fetched.", { ...user, counts: { services: servicesCount, bookings: bookingsCount } });
+    sendResponse(res, 200, true, "User fetched.", {
+      ...withEffectivePlan(user),
+      counts: { services: servicesCount, bookings: bookingsCount },
+    });
   } catch (error) { next(error); }
 });
 
@@ -164,7 +173,12 @@ router.get("/transactions", async (req, res, next) => {
       .find({ _id: { $in: vendorIds } }, { projection: { name: 1, email: 1, image: 1, businessName: 1 } }).toArray();
     const map = new Map(vendors.map((v) => [String(v._id), v]));
     sendResponse(res, 200, true, "Transactions fetched.", {
-      items: items.map((item) => ({ ...item, vendor: map.get(String(item.vendorId)) || null })),
+      items: items.map((item) => ({
+        ...item,
+        periodStart: toIsoOrNull(item.periodStart),
+        periodEnd: toIsoOrNull(item.periodEnd),
+        vendor: map.get(String(item.vendorId)) || null,
+      })),
       total, page, limit, pages: Math.ceil(total / limit),
     });
   } catch (error) { next(error); }
