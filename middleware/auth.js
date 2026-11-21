@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { getDb } from "../db.js";
-import { getCancelAtPeriodEnd, getCurrentPeriodEnd, getEffectivePlan, getStoredStatus, sendResponse } from "../helpers.js";
+import { getAccountStatus, getCancelAtPeriodEnd, getCurrentPeriodEnd, getEffectivePlan, getStoredStatus, isUserBlocked, sendResponse } from "../helpers.js";
 import { sendUnauthorized } from "./unauthorized.js";
 import { verifyToken } from "../verifyJwt.js";
 
@@ -95,14 +95,20 @@ export async function requireAuth(req, res, next) {
       console.info(`Authentication user lookup matched by ${matchedBy}.`);
     }
     // Blocking is always enforced from the database, never from token claims.
-    if (user.isBlocked === true) return sendResponse(res, 403, false, "Your account is blocked");
+    // Admin routes must remain available to admins, so admins are exempt.
+    const role = ["vendor", "customer", "admin"].includes(user.role) ? user.role : "customer";
+    const blocked = isUserBlocked(user);
+    if (blocked && role !== "admin") {
+      return sendResponse(res, 403, false, "Your account has been blocked.");
+    }
 
     const plan = getEffectivePlan(user);
     const storedStatus = getStoredStatus(user);
     req.user = {
       ...user,
-      role: ["vendor", "customer", "admin"].includes(user.role) ? user.role : "customer",
-      isBlocked: user.isBlocked === true,
+      role,
+      isBlocked: blocked,
+      accountStatus: getAccountStatus(user),
       // Normalize every plan read through the single source of truth.
       plan,
       subscriptionPlan: plan,
