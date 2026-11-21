@@ -74,15 +74,10 @@ app.get("/api/health/db", async (req, res) => {
   try {
     const db = await initDatabase();
     await db.command({ ping: 1 });
-    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
-    res.json({
-      success: true,
-      database: process.env.DB_NAME,
-      collections: collections.map((collection) => collection.name),
-    });
+    sendResponse(res, 200, true, "Database is healthy.", { status: "ok" });
   } catch (error) {
     console.error("MongoDB health check failed:", error.message);
-    res.status(500).json({ success: false, message: error.message });
+    sendResponse(res, 500, false, "Database health check failed.");
   }
 });
 

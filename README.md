@@ -59,9 +59,9 @@ The server listens on `PORT` (default `5000`) outside Vercel.
 | Purpose | Local | Live placeholder |
 |---|---|---|
 | Client | `http://localhost:3000` | `https://your-client.vercel.app` |
-| Server | `http://localhost:5000` | `https://your-server.vercel.app` |
+| Server | `http://localhost:5000` | `https://wedmera-server-a09.vercel.app` |
 | Better Auth JWKS | `http://localhost:3000/api/auth/jwks` | `https://your-client.vercel.app/api/auth/jwks` |
-| Stripe webhook | `http://localhost:5000/api/webhooks/stripe` | `https://your-server.vercel.app/api/webhooks/stripe` |
+| Stripe webhook | `http://localhost:5000/api/webhooks/stripe` | `https://wedmera-server-a09.vercel.app/api/webhooks/stripe` |
 
 For local Stripe testing:
 
@@ -181,11 +181,11 @@ The existing Better Auth user is promoted to `admin`. Log out and sign in again 
 2. Keep `api/index.js` as the serverless entry and use `vercel.json` to rewrite routes.
 3. Set `JWKS_URL` to the live Better Auth client JWKS endpoint.
 4. Set `CLIENT_URL` to the live client URL (or comma-separated origins).
-5. Register `https://your-server.vercel.app/api/webhooks/stripe` in Stripe.
+5. Register `https://wedmera-server-a09.vercel.app/api/webhooks/stripe` in Stripe.
 6. Subscribe to: `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`, and `checkout.session.async_payment_failed`.
 
-Local repository placeholder: `https://github.com/your-account/wedmera-server`
+Server repository: `https://github.com/mehediramim-13/wedmera-server-a09`
 
-Client repository placeholder: `https://github.com/your-account/wedmera-client`
+Client repository: `https://github.com/mehediramim-13/wedmera-client-a09`
 
-Live server placeholder: `https://your-wedmera-server.vercel.app`
+Live server: `https://wedmera-server-a09.vercel.app`

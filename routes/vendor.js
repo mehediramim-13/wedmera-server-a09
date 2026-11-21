@@ -5,7 +5,7 @@ import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/roles.js";
 import { validateBody } from "../middleware/validate.js";
-import { buildVendorPlanUpdate, countActiveServices, getFreePlanServiceLimit, getCurrentPeriodEnd, getCurrentPeriodStart, getEffectivePlan, isValidObjectId, sendResponse, SERVICE_CATEGORIES, subscriptionPeriodDatesFromStripe, subscriptionResponse, toIsoOrNull, toObjectId, vendorIdQuery } from "../helpers.js";
+import { countActiveServices, getFreePlanServiceLimit, getEffectivePlan, isValidObjectId, sendResponse, SERVICE_CATEGORIES, subscriptionResponse, toIsoOrNull, toObjectId, vendorIdQuery } from "../helpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("vendor"));
@@ -213,35 +213,25 @@ router.get("/subscription", async (req, res, next) => {
 
 router.post("/subscription/resume", async (req, res, next) => {
   try {
-    if (!req.user.stripeSubscriptionId) {
+    const user = await getDb().collection(process.env.USERS_COLLECTION || "user").findOne(
+      { _id: req.user._id },
+      { projection: { stripeSubscriptionId: 1 } },
+    );
+    const subscriptionId = user?.stripeSubscriptionId;
+    if (!subscriptionId) {
       return sendResponse(res, 404, false, "No subscription found to resume.");
     }
 
-    // Resume the existing Stripe subscription in place. Do not create a new
-    // Checkout Session, which would otherwise charge the vendor again.
-    const stripe = getStripe();
-    const subscription = await stripe.subscriptions.update(req.user.stripeSubscriptionId, {
+    // Resume the existing Stripe subscription in place. The verified webhook
+    // updates local plan state when Stripe confirms the change.
+    const subscription = await getStripe().subscriptions.update(subscriptionId, {
       cancel_at_period_end: false,
     });
 
-    const stripeDates = subscriptionPeriodDatesFromStripe(subscription);
-    const periodStart = stripeDates.currentPeriodStart || getCurrentPeriodStart(req.user);
-    const periodEnd = stripeDates.currentPeriodEnd || getCurrentPeriodEnd(req.user);
-    const users = getDb().collection(process.env.USERS_COLLECTION || "user");
-    await users.updateOne(
-      { _id: req.user._id },
-      {
-        $set: buildVendorPlanUpdate({
-          status: subscription?.status || "active",
-          cancelAtPeriodEnd: false,
-          currentPeriodStart: periodStart,
-          currentPeriodEnd: periodEnd,
-        }),
-      },
-    );
-
-    const user = await users.findOne({ _id: req.user._id });
-    sendResponse(res, 200, true, "Subscription resumed.", subscriptionResponse(user));
+    sendResponse(res, 200, true, "Request sent, your plan will update shortly", {
+      subscriptionId: subscription?.id || null,
+      cancelAtPeriodEnd: subscription?.cancel_at_period_end === true,
+    });
   } catch (error) { next(error); }
 });
 
