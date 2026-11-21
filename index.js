@@ -40,6 +40,14 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
+// If the client calls a path without the "/api" prefix (for example
+// /vendor/subscription), add the prefix so it reaches the same routes.
+app.use((req, res, next) => {
+  if (req.url === "/" || /^\/api(\/|\?|$)/.test(req.url)) return next();
+  req.url = `/api${req.url}`;
+  next();
+});
+
 const ensureDB = async (req, res, next) => {
   try {
     await connectDB();
