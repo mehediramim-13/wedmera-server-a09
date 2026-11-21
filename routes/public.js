@@ -28,7 +28,10 @@ function visibleServiceStages(filter) {
       as: "vendor",
     } },
     { $unwind: "$vendor" },
-    { $match: { "vendor.isBlocked": { $ne: true } } },
+    { $match: { $and: [
+      { "vendor.isBlocked": { $ne: true } },
+      { "vendor.accountStatus": { $ne: "blocked" } },
+    ] } },
   ];
 }
 
