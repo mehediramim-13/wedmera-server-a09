@@ -167,6 +167,18 @@ export function getCancelAtPeriodEnd(user) {
   return user?.cancelAtPeriodEndLegacy === true;
 }
 
+// Account blocking is separate from subscription status. `status` is also used
+// as a legacy subscription field, so accountStatus/isBlocked are authoritative.
+export function isUserBlocked(user) {
+  return user?.isBlocked === true ||
+    user?.accountStatus === "blocked" ||
+    user?.status === "blocked";
+}
+
+export function getAccountStatus(user) {
+  return isUserBlocked(user) ? "blocked" : "active";
+}
+
 export function getSubscriptionStatus(user) {
   const stored = getStoredStatus(user);
   const effective = getEffectivePlan(user);
@@ -258,7 +270,8 @@ export function safeUser(user) {
     email: user.email || "",
     image: user.image || null,
     role: USER_ROLES.includes(user.role) ? user.role : "customer",
-    isBlocked: user.isBlocked === true,
+    isBlocked: isUserBlocked(user),
+    accountStatus: getAccountStatus(user),
     businessName: user.businessName || "",
     phone: user.phone || "",
     address: user.address || "",
