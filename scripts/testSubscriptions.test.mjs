@@ -83,7 +83,7 @@ function subscriptionFor(vendorId, id, customer, periodEnd = futureSec) {
   };
 }
 
-async function createVendor(label, { stringId = false } = {}) {
+async function createUser(label, role = "vendor", { stringId = false } = {}) {
   const objectId = new ObjectId();
   const _id = stringId ? objectId.toHexString() : objectId;
   const email = `${label}.${Date.now()}.${Math.random().toString(16).slice(2)}@example.com`;
@@ -91,8 +91,9 @@ async function createVendor(label, { stringId = false } = {}) {
     _id,
     email,
     name: label,
-    role: "vendor",
+    role,
     isBlocked: false,
+    accountStatus: "active",
     subscriptionPlan: "free",
     subscriptionExpiresAt: null,
   };
@@ -107,6 +108,10 @@ async function createVendor(label, { stringId = false } = {}) {
   return { user, token };
 }
 
+async function createVendor(label, options = {}) {
+  return createUser(label, "vendor", options);
+}
+
 async function getJson(path, token) {
   const res = await fetch(`${base}${path}`, {
     headers: token ? { authorization: `Bearer ${token}` } : {},
@@ -116,6 +121,18 @@ async function getJson(path, token) {
     body: await res.json(),
     cacheControl: res.headers.get("cache-control"),
   };
+}
+
+async function patchJson(path, body, token) {
+  const res = await fetch(`${base}${path}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
 }
 
 const checkoutEvent = (vendorId, {
@@ -975,5 +992,74 @@ test("Stripe subscriptions activate Premium only from confirmed webhooks and exp
     assert.equal(services.length, 3);
     assert.equal(services.filter((service) => service.isActive === false).length, 0);
     assert.equal(await countActiveServices(db, vendor.user._id), 3);
+  });
+
+  await t.test("admin blocks/unblocks users and blocked users cannot access protected routes", async () => {
+    const admin = await createUser("Admin Block", "admin");
+    const vendor = await createVendor("Vendor Blocked");
+    const customer = await createUser("Customer Blocked", "customer");
+
+    let res = await patchJson(`/api/admin/users/${vendor.user._id}`, { status: "blocked" }, admin.token);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.data.status, "blocked");
+    assert.equal(res.body.data.accountStatus, "blocked");
+    assert.equal(res.body.data.isBlocked, true);
+    let stored = await users.findOne({ _id: vendor.user._id });
+    assert.equal(stored.accountStatus, "blocked");
+    assert.equal(stored.isBlocked, true);
+
+    res = await patchJson(`/api/admin/users/${vendor.user._id}`, { status: "suspended" }, admin.token);
+    assert.equal(res.status, 400);
+    res = await patchJson("/api/admin/users/not-an-object-id", { status: "blocked" }, admin.token);
+    assert.equal(res.status, 400);
+    res = await patchJson(`/api/admin/users/${admin.user._id}`, { status: "blocked" }, admin.token);
+    assert.equal(res.status, 403);
+    res = await patchJson(`/api/admin/users/${vendor.user._id}`, { status: "active" }, customer.token);
+    assert.equal(res.status, 403);
+
+    const blockedPaths = [
+      "/api/users/me",
+      "/api/vendor/subscription",
+      "/api/vendor/transactions",
+      "/api/customer/overview",
+      "/api/payments/session/cs_any",
+      `/api/services/${new ObjectId().toHexString()}`,
+    ];
+    for (const path of blockedPaths) {
+      const blocked = await getJson(path, vendor.token);
+      assert.equal(blocked.status, 403, `${path} should reject blocked users`);
+      assert.deepEqual(blocked.body, {
+        success: false,
+        message: "Your account has been blocked.",
+      });
+    }
+    const blockedBooking = await patchJson("/api/bookings", {}, vendor.token);
+    assert.equal(blockedBooking.status, 403);
+
+    const adminList = await getJson("/api/admin/users", admin.token);
+    assert.equal(adminList.status, 200);
+    const listedVendor = adminList.body.data.items.find(
+      (item) => String(item._id) === String(vendor.user._id),
+    );
+    assert.ok(listedVendor, "blocked vendor should appear in the admin users list");
+    assert.equal(listedVendor.status, "blocked");
+    assert.equal(listedVendor.accountStatus, "blocked");
+
+    // A blocked admin must still be able to use admin routes.
+    await users.updateOne(
+      { _id: admin.user._id },
+      { $set: { isBlocked: true, accountStatus: "blocked" } },
+    );
+    assert.equal((await getJson("/api/admin/users", admin.token)).status, 200);
+
+    res = await patchJson(`/api/admin/users/${vendor.user._id}`, { status: "active" }, admin.token);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.status, "active");
+    assert.equal(res.body.data.isBlocked, false);
+    stored = await users.findOne({ _id: vendor.user._id });
+    assert.equal(stored.accountStatus, "active");
+    assert.equal(stored.isBlocked, false);
+    assert.equal((await getJson("/api/vendor/subscription", vendor.token)).status, 200);
   });
 });
