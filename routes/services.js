@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
-import { isValidObjectId, sendResponse, subscriptionResponse, toObjectId } from "../helpers.js";
+import { isUserBlocked, isValidObjectId, sendResponse, subscriptionResponse, toObjectId } from "../helpers.js";
 
 const router = Router();
 
@@ -18,9 +18,9 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     }
     const vendor = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
       { _id: service.vendorId },
-      { projection: { name: 1, image: 1, businessName: 1, isBlocked: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
+      { projection: { name: 1, image: 1, businessName: 1, isBlocked: 1, accountStatus: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
     );
-    if (!isOwner && req.user.role !== "admin" && vendor?.isBlocked === true) {
+    if (!isOwner && req.user.role !== "admin" && isUserBlocked(vendor)) {
       return sendResponse(res, 404, false, "Service not found.");
     }
     const subscription = vendor ? subscriptionResponse(vendor) : null;
