@@ -4,13 +4,33 @@ import { getDb } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/roles.js";
 import { validateBody } from "../middleware/validate.js";
-import { escapeRegex, isValidObjectId, sendResponse, subscriptionResponse, toIsoOrNull, toObjectId, SERVICE_CATEGORIES } from "../helpers.js";
+import { escapeRegex, getAccountStatus, isUserBlocked, isValidObjectId, sendResponse, subscriptionResponse, toIsoOrNull, toObjectId, SERVICE_CATEGORIES } from "../helpers.js";
 
 const router = Router();
 router.use(requireAuth, requireRole("admin"));
 
+const userProjection = {
+  name: 1, email: 1, image: 1, role: 1, isBlocked: 1, accountStatus: 1,
+  businessName: 1, phone: 1, address: 1, bio: 1,
+  subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1,
+  subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodStart: 1,
+  currentPeriodEnd: 1, isPremium: 1, isFeatured: 1,
+};
+
 function withEffectivePlan(user) {
-  return { ...user, ...subscriptionResponse(user) };
+  const subscription = subscriptionResponse(user);
+  const accountStatus = getAccountStatus(user);
+  const { status: planStatus, subscriptionStatus, ...planFields } = subscription;
+  return {
+    ...user,
+    ...planFields,
+    accountStatus,
+    isBlocked: isUserBlocked(user),
+    // The admin dashboard expects `status` to be the account status.
+    status: accountStatus,
+    subscriptionStatus,
+    planStatus,
+  };
 }
 
 router.get("/overview", async (req, res, next) => {
@@ -49,7 +69,7 @@ router.get("/users", async (req, res, next) => {
     if (req.query.role) filter.role = req.query.role;
     const users = getDb().collection(process.env.USERS_COLLECTION || "user");
     const [items, total] = await Promise.all([
-      users.find(filter, { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } })
+      users.find(filter, { projection: userProjection })
         .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
       users.countDocuments(filter),
     ]);
@@ -65,7 +85,7 @@ router.get("/users/:id", async (req, res, next) => {
     const db = getDb();
     const user = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
       { _id: toObjectId(req.params.id) },
-      { projection: { name: 1, email: 1, image: 1, role: 1, isBlocked: 1, businessName: 1, phone: 1, address: 1, bio: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1, subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodEnd: 1, isPremium: 1, isFeatured: 1 } },
+      { projection: userProjection },
     );
     if (!user) return sendResponse(res, 404, false, "User not found.");
     const [servicesCount, bookingsCount] = await Promise.all([
@@ -79,22 +99,40 @@ router.get("/users/:id", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-async function setBlocked(req, res, next, isBlocked) {
+const accountStatusSchema = z.object({
+  status: z.enum(["blocked", "active"]),
+}).strict();
+
+async function setAccountStatus(req, res, next, status) {
   if (!isValidObjectId(req.params.id)) return sendResponse(res, 400, false, "Invalid user id");
   try {
     const db = getDb();
     const id = toObjectId(req.params.id);
-    if (String(id) === String(req.user._id)) return sendResponse(res, 403, false, "Cannot block or unblock yourself.");
+    if (String(id) === String(req.user._id)) {
+      return sendResponse(res, 403, false, "Cannot block or unblock yourself.");
+    }
     const users = db.collection(process.env.USERS_COLLECTION || "user");
-    const user = await users.findOne({ _id: id });
+    const user = await users.findOne({ _id: id }, { projection: { role: 1 } });
     if (!user) return sendResponse(res, 404, false, "User not found.");
     if (user.role === "admin") return sendResponse(res, 403, false, "Cannot block or unblock an admin.");
-    await users.updateOne({ _id: id }, { $set: { isBlocked, updatedAt: new Date() } });
-    sendResponse(res, 200, true, isBlocked ? "User blocked." : "User unblocked.");
+
+    const blocked = status === "blocked";
+    const updated = await users.findOneAndUpdate(
+      { _id: id },
+      { $set: { accountStatus: status, isBlocked: blocked, updatedAt: new Date() } },
+      { returnDocument: "after", projection: userProjection },
+    );
+    sendResponse(res, 200, true, blocked ? "User blocked." : "User unblocked.", withEffectivePlan(updated));
   } catch (error) { next(error); }
 }
-router.patch("/users/:id/block", (req, res, next) => setBlocked(req, res, next, true));
-router.patch("/users/:id/unblock", (req, res, next) => setBlocked(req, res, next, false));
+
+// Dashboard contract: PATCH /api/admin/users/:id { "status": "blocked" | "active" }
+router.patch("/users/:id", validateBody(accountStatusSchema), (req, res, next) =>
+  setAccountStatus(req, res, next, req.validated.status));
+
+// Keep the older explicit block/unblock endpoints working as well.
+router.patch("/users/:id/block", (req, res, next) => setAccountStatus(req, res, next, "blocked"));
+router.patch("/users/:id/unblock", (req, res, next) => setAccountStatus(req, res, next, "active"));
 
 router.get("/services", async (req, res, next) => {
   try {
