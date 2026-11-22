@@ -14,7 +14,7 @@ const userProjection = {
   businessName: 1, phone: 1, address: 1, bio: 1,
   subscriptionPlan: 1, subscriptionExpiresAt: 1, plan: 1, status: 1,
   subscriptionStatus: 1, cancelAtPeriodEnd: 1, currentPeriodStart: 1,
-  currentPeriodEnd: 1, isPremium: 1, isFeatured: 1,
+  currentPeriodEnd: 1, isPremium: 1, isFeatured: 1, createdAt: 1,
 };
 
 function withEffectivePlan(user) {

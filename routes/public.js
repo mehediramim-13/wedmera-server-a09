@@ -97,19 +97,42 @@ router.get("/services", async (req, res, next) => {
         .filter((vendor) => getEffectivePlan(vendor) === "premium")
         .map((vendor) => vendor._id);
     }
-    const pipeline = [
-      ...(featuredOnly ? [{ $match: { vendorId: { $in: premiumVendorIds } } }] : []),
-      ...visibleServiceStages(filter),
+    const featuredProject = {
+      serviceName: 1, category: 1, description: 1, price: 1, location: 1, images: 1,
+      status: 1, isActive: 1, createdAt: 1, updatedAt: 1, vendorId: 1,
+      vendor: { _id: "$vendor._id", name: "$vendor.name", image: "$vendor.image", businessName: "$vendor.businessName" }
+    };
+
+    let items;
+    if (featuredOnly) {
+      const premiumItems = await db.collection("services").aggregate([
+        { $match: { vendorId: { $in: premiumVendorIds } } },
+        ...visibleServiceStages(filter),
+        { $sort: { createdAt: -1 } },
+        { $limit: 6 },
+        { $project: featuredProject },
+      ]).toArray();
+      const remainingSlots = 6 - premiumItems.length;
+      const otherItems = remainingSlots > 0
+        ? await db.collection("services").aggregate([
+            { $match: { vendorId: { $nin: premiumVendorIds } } },
+            ...visibleServiceStages(filter),
+            { $sort: { createdAt: -1 } },
+            { $limit: remainingSlots },
+            { $project: featuredProject },
+          ]).toArray()
+        : [];
+      items = premiumItems.concat(otherItems);
+    } else {
+      const pipeline = [
+        ...visibleServiceStages(filter),
       { $sort: sort },
-      { $skip: featuredOnly ? 0 : (page - 1) * actualLimit },
+      { $skip: (page - 1) * actualLimit },
       { $limit: actualLimit },
-      { $project: {
-        serviceName: 1, category: 1, description: 1, price: 1, location: 1, images: 1,
-        status: 1, isActive: 1, createdAt: 1, updatedAt: 1, vendorId: 1,
-        vendor: { _id: "$vendor._id", name: "$vendor.name", image: "$vendor.image", businessName: "$vendor.businessName" }
-      } },
+      { $project: featuredProject },
     ];
-    const items = await db.collection("services").aggregate(pipeline).toArray();
+      items = await db.collection("services").aggregate(pipeline).toArray();
+    }
     for (const item of items) {
       const vendor = await db.collection(process.env.USERS_COLLECTION || "user").findOne(
         { _id: item.vendorId },
